@@ -40,6 +40,20 @@
         /* Help Modal */
         .glass-panel { background: rgba(15, 23, 42, 0.95); backdrop-filter: blur(10px); }
     </style>
+    <link rel="manifest" href="manifest.json">
+    
+<script>
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('./sw.js').then(reg => {
+                console.log('Differ Service Worker Registered!', reg.scope);
+            }).catch(err => {
+                console.warn('Differ Service Worker Failed:', err);
+            });
+        });
+    }
+</script>
+    
 </head>
 <body>
     <div id="root"></div>
