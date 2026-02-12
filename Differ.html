@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Differ V2.7 | Forgiving Patcher</title>
+    <title>Differ V2.8 | Performance & Inception Fixed</title>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
@@ -47,6 +47,16 @@
     <script type="text/babel">
         const { useState, useEffect, useRef, useMemo } = React;
 
+        // --- SAFE STORAGE WRAPPER (Self-Render Support) ---
+        const safeStorage = {
+            getItem: (key) => {
+                try { return localStorage.getItem(key); } catch (e) { return null; }
+            },
+            setItem: (key, val) => {
+                try { localStorage.setItem(key, val); } catch (e) {}
+            }
+        };
+
         const DEMO_SOURCE = `<!DOCTYPE html>
 <html>
 <body style="background: #111; color: #eee; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh;">
@@ -85,8 +95,8 @@
 
         function App() {
             // State
-            const [source, setSource] = useState(localStorage.getItem('differ_source') || DEMO_SOURCE);
-            const [patchesRaw, setPatchesRaw] = useState(localStorage.getItem('differ_patches') || DEMO_PATCH);
+            const [source, setSource] = useState(safeStorage.getItem('differ_source') || DEMO_SOURCE);
+            const [patchesRaw, setPatchesRaw] = useState(safeStorage.getItem('differ_patches') || DEMO_PATCH);
             const [parsedPatches, setParsedPatches] = useState([]);
             const [disabledPatches, setDisabledPatches] = useState(new Set()); 
             const [preview, setPreview] = useState("");
@@ -113,13 +123,13 @@
             const iframeRef = useRef(null);
 
             // Persist
-            useEffect(() => { localStorage.setItem('differ_source', source); }, [source]);
-            useEffect(() => { localStorage.setItem('differ_patches', patchesRaw); }, [patchesRaw]);
+            useEffect(() => { safeStorage.setItem('differ_source', source); }, [source]);
+            useEffect(() => { safeStorage.setItem('differ_patches', patchesRaw); }, [patchesRaw]);
 
             // --- HISTORY ENGINE ---
             const pushHistory = (newSource) => {
                 setUndoStack(prev => [...prev, source]);
-                setRedoStack([]); // Clear redo on new action
+                setRedoStack([]); 
                 setSource(newSource);
             };
 
@@ -153,25 +163,24 @@
 
             }, [source, patchesRaw, disabledPatches]);
 
-            // --- V2.7: Forgiving Parsers ---
+            // --- V2.8: Inception-Proof Forgiving Parsers ---
 
             const parseRawPatches = (input) => {
                 const list = [];
-                // V2.7 Regex: Lookahead ensures closing tag '>>>>' is optional. 
-                // Checks for '>>>>', next '--- PATCH', next '<<<< SEARCH', or End of File ($)
-                const regex = /(?:--- PATCH\s*(.*?)\s*---)?\s*<<<< SEARCH\s*([\s\S]*?)\s*==== REPLACE\s*([\s\S]*?)(?=\s*>>>>|\s*--- PATCH\b|\s*<<<< SEARCH\b|$)(?:\s*>>>>)?/gi;
+                // V2.8 Logic: Prioritizes explicit '>>>>' closer; falls back to lookahead for headers/EOF.
+                // This allows REPLACE blocks to contain '<<<< SEARCH' (essential for patching Differ itself).
+                const regex = /(?:--- PATCH\s*(.*?)\s*---)?\s*<<<< SEARCH\s*([\s\S]*?)\s*==== REPLACE\s*([\s\S]*?)(?:\s*>>>>|(?=\s*--- PATCH\b|$))/gi;
                 
                 let match;
                 let idx = 0;
                 while ((match = regex.exec(input)) !== null) {
-                    // Safety break for zero-width matches to prevent infinite loops
                     if (match.index === regex.lastIndex) regex.lastIndex++;
                     
                     list.push({
                         id: idx++,
                         label: match[1] ? match[1].trim() : null,
-                        search: match[2], // Keep raw structure for anchor parsing
-                        replace: match[3].replace(/^\r?\n/, '').replace(/\r?\n$/, ''), // Trim ends of replacement
+                        search: match[2],
+                        replace: match[3].replace(/^\r?\n/, '').replace(/\r?\n$/, ''),
                         rawBlock: match[0],
                         fullMatchIndex: match.index
                     });
@@ -185,14 +194,13 @@
                 const lineMatch = chunk.match(lineRegex);
                 if (lineMatch) {
                     const srcLines = fullText.split('\n');
-                    const startLine = parseInt(lineMatch[1], 10) - 1; // 1-based input -> 0-based index
-                    const endLine = parseInt(lineMatch[2], 10);       // Inclusive end line
+                    const startLine = parseInt(lineMatch[1], 10) - 1;
+                    const endLine = parseInt(lineMatch[2], 10);
                     
                     if (startLine < 0 || endLine > srcLines.length || startLine >= endLine) {
                         return { found: false, reason: `Invalid Range #${lineMatch[1]}-#${lineMatch[2]}` };
                     }
 
-                    // Calculate indices
                     const preText = srcLines.slice(0, startLine).join('\n') + (startLine > 0 ? '\n' : '');
                     const targetText = srcLines.slice(startLine, endLine).join('\n');
                     
@@ -205,7 +213,6 @@
                     const topAnchor = anchorSplit[0].trim();
                     const btmAnchor = anchorSplit[1].trim();
                     
-                    // Simple search for anchors
                     const topIdx = fullText.indexOf(topAnchor);
                     if (topIdx === -1) return { found: false, reason: "Start anchor not found" };
                     
@@ -217,13 +224,11 @@
                 }
 
                 // STRATEGY 3: Standard Block Match (Exact & Soft)
-                const cleanChunk = chunk.replace(/^\r?\n/, '').replace(/\r?\n$/, ''); // Normalize
+                const cleanChunk = chunk.replace(/^\r?\n/, '').replace(/\r?\n$/, '');
                 
-                // Exact
                 const exactIdx = fullText.indexOf(cleanChunk);
                 if (exactIdx !== -1) return { found: true, start: exactIdx, end: exactIdx + cleanChunk.length };
 
-                // Soft (Whitespace Insensitive)
                 const srcLines = fullText.split('\n');
                 const chunkLines = cleanChunk.split('\n').map(l => l.trim()).filter(l => l !== '');
                 if (chunkLines.length === 0) return { found: false, reason: "Empty search block" };
@@ -252,7 +257,6 @@
                 return { found: false, reason: "No match found" };
             };
 
-            // --- ENGINE CORE ---
             const scanForHighlights = (src, patchList) => {
                 const ranges = [];
                 patchList.forEach(p => {
@@ -316,9 +320,7 @@
                 if (matchResult.found) {
                     const pre = source.substring(0, matchResult.start);
                     const post = source.substring(matchResult.end);
-
                     pushHistory(pre + patchObj.replace + post);
-                    
                     setPatchesRaw(patchesRaw.replace(patchObj.rawBlock, '').trim());
                     const newSet = new Set(disabledPatches);
                     newSet.delete(patchId);
@@ -342,7 +344,6 @@
                 setActiveHoverMatch(visibleMatch || null);
             };
 
-            // --- RENDER HELPERS ---
             const renderHighlights = () => {
                 return source.split('\n').map((line, i) => {
                     const match = visualHighlights.find(r => i >= r.start && i <= r.end);
@@ -365,14 +366,18 @@
                 });
             };
 
-            const isHTML = preview.trim().startsWith('<');
+            // V2.8 Robust HTML Detection
+            const isHTML = /^\s*<(!DOCTYPE|html)/i.test(preview);
             const showRender = renderMode === 'render' || (renderMode === 'auto' && isHTML);
             
             useEffect(() => {
+                let url;
                 if (showRender && iframeRef.current) {
                     const blob = new Blob([preview], { type: 'text/html' });
-                    iframeRef.current.src = URL.createObjectURL(blob);
+                    url = URL.createObjectURL(blob);
+                    iframeRef.current.src = url;
                 }
+                return () => { if (url) URL.revokeObjectURL(url); };
             }, [preview, showRender]);
 
             return (
@@ -387,9 +392,9 @@
                                 
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                     <div className="space-y-4">
-                                        <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                                            <div className="text-xs font-bold text-emerald-400 mb-2 uppercase tracking-wider">1. Standard Block</div>
-                                            <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
+                                        <div class="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                            <div class="text-xs font-bold text-emerald-400 mb-2 uppercase tracking-wider">1. Standard Block</div>
+                                            <pre class="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
 {`<<<< SEARCH
   const a = 1;
   const b = 2;
@@ -399,47 +404,43 @@
 >>>>`}
                                             </pre>
                                         </div>
-                                        <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                                            <div className="text-xs font-bold text-blue-400 mb-2 uppercase tracking-wider">2. Line Numbers</div>
-                                            <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
+                                        <div class="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                            <div class="text-xs font-bold text-blue-400 mb-2 uppercase tracking-wider">2. Line Numbers</div>
+                                            <pre class="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
 {`<<<< SEARCH
 #100
 :
 #105
 
-  // Replaces lines 100-105
   newCode();
 >>>>`}
                                             </pre>
                                         </div>
                                     </div>
                                     <div className="space-y-4">
-                                        <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                                            <div className="text-xs font-bold text-purple-400 mb-2 uppercase tracking-wider">3. Range Anchors</div>
-                                            <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
+                                        <div class="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                            <div class="text-xs font-bold text-purple-400 mb-2 uppercase tracking-wider">3. Range Anchors</div>
+                                            <pre class="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
 {`<<<< SEARCH
   <div id="start">
 >>
-  </div> <!-- end -->
+  </div>
 ==== REPLACE
   <div id="new"></div>
 >>>>`}
                                             </pre>
-                                            <p className="text-[9px] text-slate-500 mt-2">Finds 'start' anchor, then finds 'end' anchor after it. Replaces everything between (inclusive).</p>
                                         </div>
-                                        <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                                            <div className="text-xs font-bold text-amber-400 mb-2 uppercase tracking-wider">4. Chained & Forgiving</div>
-                                            <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
-{`<<<< SEARCH
-  old block 1
-==== REPLACE
-  new block 1
+                                        <div class="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                            <div class="text-xs font-bold text-amber-400 mb-2 uppercase tracking-wider">4. Meta-Patching (Inception)</div>
+                                            <pre class="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
+{`--- PATCH ---
 <<<< SEARCH
-  old block 2
+  code
 ==== REPLACE
-  new block 2`}
+  new code (can contain <<<< SEARCH)
+>>>>`}
                                             </pre>
-                                            <p className="text-[9px] text-slate-500 mt-2">Headers and closing tags (&gt;&gt;&gt;&gt;) are totally optional. Seamlessly paste multiple stacked blocks.</p>
+                                            <p class="text-[9px] text-slate-500 mt-2">To patch Differ using itself, you <strong>MUST</strong> use the explicit <strong>&gt;&gt;&gt;&gt;</strong> closer.</p>
                                         </div>
                                     </div>
                                 </div>
@@ -447,11 +448,10 @@
                         </div>
                     )}
 
-                    {/* TOOLBAR */}
                     <header className="h-14 bg-slate-950 border-b border-slate-800 flex items-center justify-between px-4 shrink-0 z-50">
                         <div className="flex items-center gap-3">
                             <div className="bg-blue-600 text-white w-8 h-8 rounded-lg flex items-center justify-center font-bold text-lg">D</div>
-                            <h1 className="font-bold text-slate-100 tracking-wide text-sm hidden md:block">Differ <span className="text-slate-500 font-normal">v2.7</span></h1>
+                            <h1 className="font-bold text-slate-100 tracking-wide text-sm hidden md:block">Differ <span className="text-slate-500 font-normal">v2.8</span></h1>
                             <div className="flex gap-2 ml-4">
                                 {stats.matched > 0 && <span className="text-xs px-2 py-1 rounded bg-emerald-950/50 border border-emerald-900 text-emerald-400 font-mono">MATCH: {stats.matched}</span>}
                                 {stats.failed > 0 && <span className="text-xs px-2 py-1 rounded bg-rose-950/50 border border-rose-900 text-rose-400 font-mono">ERR: {stats.failed}</span>}
@@ -470,9 +470,7 @@
                         </div>
                     </header>
 
-                    {/* MAIN GRID */}
                     <div className="flex-grow flex overflow-hidden divide-x divide-slate-800 relative">
-                        {/* COL 1: INPUT */}
                         <div className={`flex flex-col bg-slate-950 transition-all duration-300 ${showInputColumn ? 'w-1/4 min-w-[280px]' : 'w-0 opacity-0 overflow-hidden'}`}>
                             <div className="h-1/2 flex flex-col border-b border-slate-800">
                                 <div className="h-8 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-3">
@@ -500,7 +498,6 @@
                             </div>
                         </div>
 
-                        {/* COL 2: SOURCE */}
                         <div className="flex-1 flex flex-col bg-[#0f172a] relative min-w-0 group">
                             <div className="h-8 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-3 z-20 shrink-0">
                                 <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">2. Source Code</span>
@@ -529,7 +526,6 @@
                             </div>
                         </div>
 
-                        {/* COL 3: PREVIEW */}
                         <div className="w-1/3 min-w-[300px] flex flex-col bg-[#0b1221] border-l border-slate-800">
                             <div className="h-8 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-3">
                                 <span className="text-[10px] font-bold uppercase tracking-widest text-blue-500">Result</span>
@@ -540,7 +536,7 @@
                                 </div>
                             </div>
                             <div className="flex-grow overflow-hidden relative">
-                                {showRender ? <iframe ref={iframeRef} className="preview-frame" sandbox="allow-scripts allow-same-origin allow-modals"></iframe> : <div className="h-full overflow-auto p-4 text-slate-400 editor-font whitespace-pre">{preview}</div>}
+                                {showRender ? <iframe ref={iframeRef} className="preview-frame" sandbox="allow-scripts allow-same-origin allow-modals allow-downloads allow-forms allow-popups"></iframe> : <div class="h-full overflow-auto p-4 text-slate-400 editor-font whitespace-pre">{preview}</div>}
                             </div>
                         </div>
                     </div>
