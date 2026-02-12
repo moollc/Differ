@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Differ V2.8 | Performance & Inception Fixed</title>
+    <title>Differ V3.0 | Sandbox Engine</title>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
@@ -93,6 +93,35 @@
 ==== REPLACE
         <h1 style="color: #4ade80">Welcome Back, User</h1>`;
 
+        // --- V3.0 SANDBOX POLYFILL ENGINE ---
+        // Dynamically injected into the preview Iframe to emulate browser storage APIs.
+        // Prevents execution crashes caused by opaque Blob origin restrictions.
+        const SANDBOX_POLYFILL = '<script>\n' +
+            '(function() {\n' +
+            '    try {\n' +
+            '        const store = {};\n' +
+            '        const mock = {\n' +
+            '            getItem: k => store.hasOwnProperty(k) ? store[k] : null,\n' +
+            '            setItem: (k, v) => store[k] = String(v),\n' +
+            '            removeItem: k => delete store[k],\n' +
+            '            clear: () => { for (let k in store) delete store[k]; },\n' +
+            '            get length() { return Object.keys(store).length; },\n' +
+            '            key: i => Object.keys(store)[i] || null\n' +
+            '        };\n' +
+            '        Object.defineProperty(window, "localStorage", { value: mock, configurable: true, enumerable: true, writable: true });\n' +
+            '        Object.defineProperty(window, "sessionStorage", { value: mock, configurable: true, enumerable: true, writable: true });\n' +
+            '        Object.defineProperty(window, "indexedDB", { value: null, configurable: true, enumerable: true, writable: true });\n' +
+            '        const mockSW = { register: () => Promise.resolve({ onupdatefound: null, installing: { onstatechange: null } }) };\n' +
+            '        if (!navigator.serviceWorker) {\n' +
+            '            Object.defineProperty(navigator, "serviceWorker", { value: mockSW, configurable: true, enumerable: true, writable: true });\n' +
+            '        } else {\n' +
+            '            navigator.serviceWorker.register = mockSW.register;\n' +
+            '        }\n' +
+            '        console.log("[Differ] Sandbox Mode Active: Persistent APIs mocked in memory.");\n' +
+            '    } catch (e) { console.warn("[Differ] Sandbox injection constrained.", e); }\n' +
+            '})();\n' +
+            '</' + 'script>\n';
+
         function App() {
             // State
             const [source, setSource] = useState(safeStorage.getItem('differ_source') || DEMO_SOURCE);
@@ -149,18 +178,21 @@
                 setSource(nextSource);
             };
 
-            // --- MAIN ENGINE ---
+            // --- MAIN ENGINE (Debounced for Monolith Support) ---
             useEffect(() => {
-                const rawList = parseRawPatches(patchesRaw);
-                const result = processPatches(source, rawList, disabledPatches);
-                
-                setParsedPatches(result.patches);
-                setPreview(result.finalCode);
-                setStats(result.stats);
+                const timerId = setTimeout(() => {
+                    const rawList = parseRawPatches(patchesRaw);
+                    const result = processPatches(source, rawList, disabledPatches);
+                    
+                    setParsedPatches(result.patches);
+                    setPreview(result.finalCode);
+                    setStats(result.stats);
 
-                const highlights = scanForHighlights(source, rawList);
-                setVisualHighlights(highlights);
+                    const highlights = scanForHighlights(source, rawList);
+                    setVisualHighlights(highlights);
+                }, 300);
 
+                return () => clearTimeout(timerId);
             }, [source, patchesRaw, disabledPatches]);
 
             // --- V2.8: Inception-Proof Forgiving Parsers ---
@@ -344,10 +376,13 @@
                 setActiveHoverMatch(visibleMatch || null);
             };
 
+            // V2.9: Virtualized Highlights (Reduces 10k nodes to just active highlights)
             const renderHighlights = () => {
-                return source.split('\n').map((line, i) => {
-                    const match = visualHighlights.find(r => i >= r.start && i <= r.end);
-                    return <div key={i} className={`h-5 w-full whitespace-pre px-4 ${match ? 'highlight-match strikethrough' : ''}`}>{line || ' '}</div>;
+                const lineHeight = 20;
+                return visualHighlights.map((match, i) => {
+                    const topPos = match.start * lineHeight;
+                    const h = (match.end - match.start + 1) * lineHeight;
+                    return <div key={i} className="absolute left-0 right-0 mx-4 highlight-match strikethrough pointer-events-none" style={{ top: `${topPos}px`, height: `${h}px` }}></div>;
                 });
             };
 
@@ -366,14 +401,36 @@
                 });
             };
 
+            // V2.9: Virtualized Line Numbers (Reduces 10k div nodes to a single string node)
+            const lineNumbersText = useMemo(() => {
+                const count = source.split('\n').length;
+                let text = '';
+                for(let i=1; i<=count; i++) text += i + '\n';
+                return text;
+            }, [source]);
+
             // V2.8 Robust HTML Detection
             const isHTML = /^\s*<(!DOCTYPE|html)/i.test(preview);
             const showRender = renderMode === 'render' || (renderMode === 'auto' && isHTML);
             
+            // --- V3.0 RENDER EXECUTION ---
             useEffect(() => {
                 let url;
                 if (showRender && iframeRef.current) {
-                    const blob = new Blob([preview], { type: 'text/html' });
+                    let processedPreview = preview;
+                    
+                    // Inject Sandbox Polyfill into the HTML
+                    if (isHTML) {
+                        if (/<head[^>]*>/i.test(processedPreview)) {
+                            processedPreview = processedPreview.replace(/(<head[^>]*>)/i, '$1\n' + SANDBOX_POLYFILL);
+                        } else if (/<html[^>]*>/i.test(processedPreview)) {
+                            processedPreview = processedPreview.replace(/(<html[^>]*>)/i, '$1\n<head>\n' + SANDBOX_POLYFILL + '</head>\n');
+                        } else {
+                            processedPreview = SANDBOX_POLYFILL + processedPreview;
+                        }
+                    }
+
+                    const blob = new Blob([processedPreview], { type: 'text/html' });
                     url = URL.createObjectURL(blob);
                     iframeRef.current.src = url;
                 }
@@ -392,9 +449,9 @@
                                 
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                     <div className="space-y-4">
-                                        <div class="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                                            <div class="text-xs font-bold text-emerald-400 mb-2 uppercase tracking-wider">1. Standard Block</div>
-                                            <pre class="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
+                                        <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                            <div className="text-xs font-bold text-emerald-400 mb-2 uppercase tracking-wider">1. Standard Block</div>
+                                            <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
 {`<<<< SEARCH
   const a = 1;
   const b = 2;
@@ -404,9 +461,9 @@
 >>>>`}
                                             </pre>
                                         </div>
-                                        <div class="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                                            <div class="text-xs font-bold text-blue-400 mb-2 uppercase tracking-wider">2. Line Numbers</div>
-                                            <pre class="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
+                                        <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                            <div className="text-xs font-bold text-blue-400 mb-2 uppercase tracking-wider">2. Line Numbers</div>
+                                            <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
 {`<<<< SEARCH
 #100
 :
@@ -418,9 +475,9 @@
                                         </div>
                                     </div>
                                     <div className="space-y-4">
-                                        <div class="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                                            <div class="text-xs font-bold text-purple-400 mb-2 uppercase tracking-wider">3. Range Anchors</div>
-                                            <pre class="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
+                                        <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                            <div className="text-xs font-bold text-purple-400 mb-2 uppercase tracking-wider">3. Range Anchors</div>
+                                            <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
 {`<<<< SEARCH
   <div id="start">
 >>
@@ -430,9 +487,9 @@
 >>>>`}
                                             </pre>
                                         </div>
-                                        <div class="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                                            <div class="text-xs font-bold text-amber-400 mb-2 uppercase tracking-wider">4. Meta-Patching (Inception)</div>
-                                            <pre class="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
+                                        <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                            <div className="text-xs font-bold text-amber-400 mb-2 uppercase tracking-wider">4. Meta-Patching (Inception)</div>
+                                            <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
 {`--- PATCH ---
 <<<< SEARCH
   code
@@ -440,7 +497,7 @@
   new code (can contain <<<< SEARCH)
 >>>>`}
                                             </pre>
-                                            <p class="text-[9px] text-slate-500 mt-2">To patch Differ using itself, you <strong>MUST</strong> use the explicit <strong>&gt;&gt;&gt;&gt;</strong> closer.</p>
+                                            <p className="text-[9px] text-slate-500 mt-2">To patch Differ using itself, you <strong>MUST</strong> use the explicit <strong>&gt;&gt;&gt;&gt;</strong> closer.</p>
                                         </div>
                                     </div>
                                 </div>
@@ -451,7 +508,7 @@
                     <header className="h-14 bg-slate-950 border-b border-slate-800 flex items-center justify-between px-4 shrink-0 z-50">
                         <div className="flex items-center gap-3">
                             <div className="bg-blue-600 text-white w-8 h-8 rounded-lg flex items-center justify-center font-bold text-lg">D</div>
-                            <h1 className="font-bold text-slate-100 tracking-wide text-sm hidden md:block">Differ <span className="text-slate-500 font-normal">v2.8</span></h1>
+                            <h1 className="font-bold text-slate-100 tracking-wide text-sm hidden md:block">Differ <span className="text-slate-500 font-normal">v3.0</span></h1>
                             <div className="flex gap-2 ml-4">
                                 {stats.matched > 0 && <span className="text-xs px-2 py-1 rounded bg-emerald-950/50 border border-emerald-900 text-emerald-400 font-mono">MATCH: {stats.matched}</span>}
                                 {stats.failed > 0 && <span className="text-xs px-2 py-1 rounded bg-rose-950/50 border border-rose-900 text-rose-400 font-mono">ERR: {stats.failed}</span>}
@@ -517,7 +574,7 @@
                                 </div>
                             )}
                             <div className="relative flex-grow flex overflow-hidden">
-                                {showLineNumbers && (<div ref={gutterRef} className="w-12 bg-slate-900 text-slate-500 text-right pr-3 pt-4 select-none editor-font overflow-hidden border-r border-slate-800 z-10 flex-shrink-0">{source.split('\n').map((_, i) => <div key={i} className="h-5">{i + 1}</div>)}<div className="h-[50vh]"></div></div>)}
+                                {showLineNumbers && (<div ref={gutterRef} className="w-12 bg-slate-900 text-slate-500 text-right pr-3 pt-4 select-none editor-font overflow-hidden border-r border-slate-800 z-10 flex-shrink-0 whitespace-pre pb-[50vh]">{lineNumbersText}</div>)}
                                 <div className="flex-1 relative overflow-hidden">
                                     <div ref={backdropRef} className="absolute inset-0 p-4 pointer-events-none editor-font text-transparent opacity-100 z-0">{renderHighlights()}</div>
                                     <textarea ref={sourceRef} value={source} onChange={(e) => setSource(e.target.value)} onScroll={handleScroll} className="absolute inset-0 w-full h-full bg-transparent p-4 text-slate-300 focus:outline-none resize-none z-10 editor-font" spellCheck="false"></textarea>
@@ -536,7 +593,7 @@
                                 </div>
                             </div>
                             <div className="flex-grow overflow-hidden relative">
-                                {showRender ? <iframe ref={iframeRef} className="preview-frame" sandbox="allow-scripts allow-same-origin allow-modals allow-downloads allow-forms allow-popups"></iframe> : <div class="h-full overflow-auto p-4 text-slate-400 editor-font whitespace-pre">{preview}</div>}
+                                {showRender ? <iframe ref={iframeRef} className="preview-frame" sandbox="allow-scripts allow-same-origin allow-modals allow-downloads allow-forms allow-popups"></iframe> : <div className="h-full overflow-auto p-4 text-slate-400 editor-font whitespace-pre">{preview}</div>}
                             </div>
                         </div>
                     </div>
