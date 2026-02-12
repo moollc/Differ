@@ -92,6 +92,10 @@
             const [preview, setPreview] = useState("");
             const [stats, setStats] = useState({ total: 0, matched: 0, failed: 0 });
             const [visualHighlights, setVisualHighlights] = useState([]);
+
+            // History State
+            const [undoStack, setUndoStack] = useState([]);
+            const [redoStack, setRedoStack] = useState([]);
             
             // View State
             const [showInputColumn, setShowInputColumn] = useState(true);
@@ -111,6 +115,29 @@
             // Persist
             useEffect(() => { localStorage.setItem('differ_source', source); }, [source]);
             useEffect(() => { localStorage.setItem('differ_patches', patchesRaw); }, [patchesRaw]);
+
+            // --- HISTORY ENGINE ---
+            const pushHistory = (newSource) => {
+                setUndoStack(prev => [...prev, source]);
+                setRedoStack([]); // Clear redo on new action
+                setSource(newSource);
+            };
+
+            const handleUndo = () => {
+                if (undoStack.length === 0) return;
+                const prevSource = undoStack[undoStack.length - 1];
+                setRedoStack(prev => [...prev, source]);
+                setUndoStack(prev => prev.slice(0, -1));
+                setSource(prevSource);
+            };
+
+            const handleRedo = () => {
+                if (redoStack.length === 0) return;
+                const nextSource = redoStack[redoStack.length - 1];
+                setUndoStack(prev => [...prev, source]);
+                setRedoStack(prev => prev.slice(0, -1));
+                setSource(nextSource);
+            };
 
             // --- MAIN ENGINE ---
             useEffect(() => {
@@ -289,7 +316,9 @@
                 if (matchResult.found) {
                     const pre = source.substring(0, matchResult.start);
                     const post = source.substring(matchResult.end);
-                    setSource(pre + patchObj.replace + post);
+
+                    pushHistory(pre + patchObj.replace + post);
+                    
                     setPatchesRaw(patchesRaw.replace(patchObj.rawBlock, '').trim());
                     const newSet = new Set(disabledPatches);
                     newSet.delete(patchId);
@@ -298,8 +327,8 @@
             };
 
             const applyAll = () => {
-                setSource(preview);
-                setPatchesRaw(""); 
+                pushHistory(preview);
+                setPatchesRaw("");
                 setDisabledPatches(new Set());
             };
 
@@ -377,7 +406,7 @@
 #100
 :
 #105
-==== REPLACE
+
   // Replaces lines 100-105
   newCode();
 >>>>`}
@@ -400,7 +429,7 @@
                                         </div>
                                         <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
                                             <div className="text-xs font-bold text-amber-400 mb-2 uppercase tracking-wider">4. Chained & Forgiving</div>
-                                            <pre class="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
+                                            <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
 {`<<<< SEARCH
   old block 1
 ==== REPLACE
@@ -473,8 +502,19 @@
 
                         {/* COL 2: SOURCE */}
                         <div className="flex-1 flex flex-col bg-[#0f172a] relative min-w-0 group">
+                            <div className="h-8 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-3 z-20 shrink-0">
+                                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">2. Source Code</span>
+                                <div className="flex items-center gap-3">
+                                    <div className="flex gap-2">
+                                        <button onClick={handleUndo} disabled={undoStack.length === 0} className="text-[10px] font-bold uppercase tracking-widest text-slate-400 hover:text-white disabled:opacity-30 transition-all"><i className="fa-solid fa-undo mr-1"></i> Undo</button>
+                                        <button onClick={handleRedo} disabled={redoStack.length === 0} className="text-[10px] font-bold uppercase tracking-widest text-slate-400 hover:text-white disabled:opacity-30 transition-all"><i className="fa-solid fa-redo mr-1"></i> Redo</button>
+                                    </div>
+                                    <div className="w-px h-3 bg-slate-700"></div>
+                                    <span className="text-[10px] text-slate-600">{source.length} chars</span>
+                                </div>
+                            </div>
                             {activeHoverMatch && (
-                                <div className="absolute top-4 right-16 z-40 bg-emerald-900/90 border border-emerald-500/50 text-emerald-100 p-3 rounded-lg shadow-xl backdrop-blur-sm max-w-sm pointer-events-none z-50">
+                                <div className="absolute top-10 right-16 z-40 bg-emerald-900/90 border border-emerald-500/50 text-emerald-100 p-3 rounded-lg shadow-xl backdrop-blur-sm max-w-sm pointer-events-none z-50">
                                     <div className="flex justify-between items-center mb-1"><span className="text-[10px] font-black uppercase tracking-widest text-emerald-400">{activeHoverMatch.label || `Patch #${activeHoverMatch.id + 1}`}</span><span className="text-[9px] font-mono opacity-70">Ln {activeHoverMatch.start + 1}</span></div>
                                     <div className="text-xs font-mono border-t border-emerald-500/30 pt-2 mt-1 opacity-90 line-clamp-3">REPLACING WITH:<br/>{activeHoverMatch.replace.substring(0, 100)}...</div>
                                 </div>
