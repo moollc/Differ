@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Differ V2.7 | Forgiving Patcher</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    
+    <style>
+        body { background-color: #0f172a; color: #e2e8f0; margin: 0; overflow: hidden; }
+        .editor-font { font-family: 'Menlo', 'Consolas', 'Monaco', monospace; font-size: 13px; line-height: 20px; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 10px; height: 10px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 5px; border: 2px solid #1e293b; }
+        ::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+        /* Visual Diffing */
+        .highlight-match { background-color: rgba(244, 63, 94, 0.1); }
+        .strikethrough {
+            background-image: linear-gradient(transparent 45%, rgba(244, 63, 94, 0.5) 45%, rgba(244, 63, 94, 0.5) 55%, transparent 55%);
+            background-size: 100% 100%;
+            background-repeat: no-repeat;
+        }
+        .highlight-active { background-color: rgba(234, 179, 8, 0.15); border-left: 2px solid #eab308; }
+        
+        /* Iframe Container */
+        .preview-frame { background: white; border: none; width: 100%; height: 100%; }
+        
+        /* Queue Item Actions */
+        .queue-actions { display: none; }
+        .queue-item:hover .queue-actions { display: flex; }
+
+        /* Help Modal */
+        .glass-panel { background: rgba(15, 23, 42, 0.95); backdrop-filter: blur(10px); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo } = React;
+
+        const DEMO_SOURCE = `<!DOCTYPE html>
+<html>
+<body style="background: #111; color: #eee; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh;">
+    <div id="app">
+        <h1>System Offline</h1>
+        <button id="btn">Retry</button>
+    </div>
+    <script>
+        document.getElementById('btn').onclick = () => alert('Connecting...');
+    <\/script>
+</body>
+</html>`;
+
+        const DEMO_PATCH = `--- PATCH 1: Anchor Mode ---
+<<<< SEARCH
+    <div id="app">
+>>
+    </div>
+==== REPLACE
+    <div id="app" class="container">
+        <h1>Welcome Back</h1>
+    </div>
+>>>>
+
+<<<< SEARCH
+#8
+:
+#8
+==== REPLACE
+        document.getElementById('btn').onclick = () => console.log('Reconnecting');
+
+<<<< SEARCH
+        <h1>Welcome Back</h1>
+==== REPLACE
+        <h1 style="color: #4ade80">Welcome Back, User</h1>`;
+
+        function App() {
+            // State
+            const [source, setSource] = useState(localStorage.getItem('differ_source') || DEMO_SOURCE);
+            const [patchesRaw, setPatchesRaw] = useState(localStorage.getItem('differ_patches') || DEMO_PATCH);
+            const [parsedPatches, setParsedPatches] = useState([]);
+            const [disabledPatches, setDisabledPatches] = useState(new Set()); 
+            const [preview, setPreview] = useState("");
+            const [stats, setStats] = useState({ total: 0, matched: 0, failed: 0 });
+            const [visualHighlights, setVisualHighlights] = useState([]);
+            
+            // View State
+            const [showInputColumn, setShowInputColumn] = useState(true);
+            const [showMiniMap, setShowMiniMap] = useState(true);
+            const [showLineNumbers, setShowLineNumbers] = useState(true);
+            const [showHelp, setShowHelp] = useState(false);
+            const [renderMode, setRenderMode] = useState('auto');
+            const [activeHoverMatch, setActiveHoverMatch] = useState(null);
+
+            // Refs
+            const sourceRef = useRef(null);
+            const backdropRef = useRef(null);
+            const gutterRef = useRef(null);
+            const mapRef = useRef(null);
+            const iframeRef = useRef(null);
+
+            // Persist
+            useEffect(() => { localStorage.setItem('differ_source', source); }, [source]);
+            useEffect(() => { localStorage.setItem('differ_patches', patchesRaw); }, [patchesRaw]);
+
+            // --- MAIN ENGINE ---
+            useEffect(() => {
+                const rawList = parseRawPatches(patchesRaw);
+                const result = processPatches(source, rawList, disabledPatches);
+                
+                setParsedPatches(result.patches);
+                setPreview(result.finalCode);
+                setStats(result.stats);
+
+                const highlights = scanForHighlights(source, rawList);
+                setVisualHighlights(highlights);
+
+            }, [source, patchesRaw, disabledPatches]);
+
+            // --- V2.7: Forgiving Parsers ---
+
+            const parseRawPatches = (input) => {
+                const list = [];
+                // V2.7 Regex: Lookahead ensures closing tag '>>>>' is optional. 
+                // Checks for '>>>>', next '--- PATCH', next '<<<< SEARCH', or End of File ($)
+                const regex = /(?:--- PATCH\s*(.*?)\s*---)?\s*<<<< SEARCH\s*([\s\S]*?)\s*==== REPLACE\s*([\s\S]*?)(?=\s*>>>>|\s*--- PATCH\b|\s*<<<< SEARCH\b|$)(?:\s*>>>>)?/gi;
+                
+                let match;
+                let idx = 0;
+                while ((match = regex.exec(input)) !== null) {
+                    // Safety break for zero-width matches to prevent infinite loops
+                    if (match.index === regex.lastIndex) regex.lastIndex++;
+                    
+                    list.push({
+                        id: idx++,
+                        label: match[1] ? match[1].trim() : null,
+                        search: match[2], // Keep raw structure for anchor parsing
+                        replace: match[3].replace(/^\r?\n/, '').replace(/\r?\n$/, ''), // Trim ends of replacement
+                        rawBlock: match[0],
+                        fullMatchIndex: match.index
+                    });
+                }
+                return list;
+            };
+
+            const findBestMatch = (fullText, chunk) => {
+                // STRATEGY 1: Line Numbers (#10 : #20)
+                const lineRegex = /^\s*#(\d+)\s*:\s*#(\d+)\s*$/;
+                const lineMatch = chunk.match(lineRegex);
+                if (lineMatch) {
+                    const srcLines = fullText.split('\n');
+                    const startLine = parseInt(lineMatch[1], 10) - 1; // 1-based input -> 0-based index
+                    const endLine = parseInt(lineMatch[2], 10);       // Inclusive end line
+                    
+                    if (startLine < 0 || endLine > srcLines.length || startLine >= endLine) {
+                        return { found: false, reason: `Invalid Range #${lineMatch[1]}-#${lineMatch[2]}` };
+                    }
+
+                    // Calculate indices
+                    const preText = srcLines.slice(0, startLine).join('\n') + (startLine > 0 ? '\n' : '');
+                    const targetText = srcLines.slice(startLine, endLine).join('\n');
+                    
+                    return { found: true, start: preText.length, end: preText.length + targetText.length };
+                }
+
+                // STRATEGY 2: Range Anchors (Top >> Bottom)
+                const anchorSplit = chunk.split(/\r?\n\s*>>\s*\r?\n/);
+                if (anchorSplit.length === 2) {
+                    const topAnchor = anchorSplit[0].trim();
+                    const btmAnchor = anchorSplit[1].trim();
+                    
+                    // Simple search for anchors
+                    const topIdx = fullText.indexOf(topAnchor);
+                    if (topIdx === -1) return { found: false, reason: "Start anchor not found" };
+                    
+                    const searchFrom = topIdx + topAnchor.length;
+                    const btmIdx = fullText.indexOf(btmAnchor, searchFrom);
+                    if (btmIdx === -1) return { found: false, reason: "End anchor not found after start" };
+                    
+                    return { found: true, start: topIdx, end: btmIdx + btmAnchor.length };
+                }
+
+                // STRATEGY 3: Standard Block Match (Exact & Soft)
+                const cleanChunk = chunk.replace(/^\r?\n/, '').replace(/\r?\n$/, ''); // Normalize
+                
+                // Exact
+                const exactIdx = fullText.indexOf(cleanChunk);
+                if (exactIdx !== -1) return { found: true, start: exactIdx, end: exactIdx + cleanChunk.length };
+
+                // Soft (Whitespace Insensitive)
+                const srcLines = fullText.split('\n');
+                const chunkLines = cleanChunk.split('\n').map(l => l.trim()).filter(l => l !== '');
+                if (chunkLines.length === 0) return { found: false, reason: "Empty search block" };
+
+                for (let i = 0; i < srcLines.length; i++) {
+                    if (srcLines[i].trim() === chunkLines[0]) {
+                        let match = true;
+                        let offset = 0;
+                        for (let j = 1; j < chunkLines.length; j++) {
+                            while (i + offset + 1 < srcLines.length && srcLines[i + offset + 1].trim() === '') offset++;
+                            if (i + offset + 1 >= srcLines.length || srcLines[i + offset + 1].trim() !== chunkLines[j]) {
+                                match = false; break;
+                            }
+                            offset++;
+                        }
+                        if (match) {
+                            const startLineIdx = i;
+                            const endLineIdx = i + offset;
+                            const preText = srcLines.slice(0, startLineIdx).join('\n') + (startLineIdx > 0 ? '\n' : '');
+                            const targetText = srcLines.slice(startLineIdx, endLineIdx + 1).join('\n');
+                            return { found: true, start: preText.length, end: preText.length + targetText.length };
+                        }
+                    }
+                }
+                
+                return { found: false, reason: "No match found" };
+            };
+
+            // --- ENGINE CORE ---
+            const scanForHighlights = (src, patchList) => {
+                const ranges = [];
+                patchList.forEach(p => {
+                    if (disabledPatches.has(p.id)) return;
+                    const loc = findBestMatch(src, p.search);
+                    if (loc.found) {
+                        const startLine = src.substring(0, loc.start).split('\n').length - 1;
+                        const endLine = src.substring(0, loc.end).split('\n').length - 1;
+                        ranges.push({ id: p.id, label: p.label, start: startLine, end: endLine, search: p.search, replace: p.replace });
+                    }
+                });
+                return ranges;
+            };
+
+            const processPatches = (srcCode, patchList, disabledSet) => {
+                const processed = [];
+                let modifiedCode = srcCode;
+                let matchedCount = 0;
+                let failedCount = 0;
+
+                patchList.forEach(p => {
+                    const info = { ...p };
+                    if (disabledSet.has(p.id)) {
+                        info.status = 'disabled';
+                        processed.push(info);
+                        return;
+                    }
+
+                    const matchResult = findBestMatch(modifiedCode, p.search);
+                    if (matchResult.found) {
+                        matchedCount++;
+                        const pre = modifiedCode.substring(0, matchResult.start);
+                        const post = modifiedCode.substring(matchResult.end);
+                        modifiedCode = pre + p.replace + post;
+                        info.status = 'success';
+                        info.line = modifiedCode.substring(0, matchResult.start).split('\n').length;
+                        processed.push(info);
+                    } else {
+                        failedCount++;
+                        info.status = 'error';
+                        info.reason = matchResult.reason;
+                        processed.push(info);
+                    }
+                });
+
+                return { patches: processed, finalCode: modifiedCode, stats: { total: patchList.length, matched: matchedCount, failed: failedCount } };
+            };
+
+            // --- UI ACTIONS ---
+            const togglePatch = (id) => {
+                const newSet = new Set(disabledPatches);
+                if (newSet.has(id)) newSet.delete(id); else newSet.add(id);
+                setDisabledPatches(newSet);
+            };
+
+            const applySinglePatch = (patchId) => {
+                const patchObj = parsedPatches.find(p => p.id === patchId);
+                if (!patchObj || patchObj.status !== 'success') return;
+
+                const matchResult = findBestMatch(source, patchObj.search);
+                if (matchResult.found) {
+                    const pre = source.substring(0, matchResult.start);
+                    const post = source.substring(matchResult.end);
+                    setSource(pre + patchObj.replace + post);
+                    setPatchesRaw(patchesRaw.replace(patchObj.rawBlock, '').trim());
+                    const newSet = new Set(disabledPatches);
+                    newSet.delete(patchId);
+                    setDisabledPatches(newSet);
+                }
+            };
+
+            const applyAll = () => {
+                setSource(preview);
+                setPatchesRaw(""); 
+                setDisabledPatches(new Set());
+            };
+
+            const handleScroll = (e) => {
+                const top = e.target.scrollTop;
+                if (backdropRef.current) backdropRef.current.scrollTop = top;
+                if (gutterRef.current) gutterRef.current.scrollTop = top;
+                const lineHeight = 20;
+                const visibleLine = Math.floor(top / lineHeight);
+                const visibleMatch = visualHighlights.find(m => visibleLine >= m.start - 2 && visibleLine <= m.end + 2);
+                setActiveHoverMatch(visibleMatch || null);
+            };
+
+            // --- RENDER HELPERS ---
+            const renderHighlights = () => {
+                return source.split('\n').map((line, i) => {
+                    const match = visualHighlights.find(r => i >= r.start && i <= r.end);
+                    return <div key={i} className={`h-5 w-full whitespace-pre px-4 ${match ? 'highlight-match strikethrough' : ''}`}>{line || ' '}</div>;
+                });
+            };
+
+            const renderMiniMap = () => {
+                const totalLines = source.split('\n').length;
+                if(totalLines === 0) return null;
+                return visualHighlights.map((h, i) => {
+                    const topPct = (h.start / totalLines) * 100;
+                    const heightPct = Math.max(((h.end - h.start + 1) / totalLines) * 100, 2); 
+                    return (
+                        <div key={i} className="absolute left-0 right-0 bg-emerald-500 opacity-60 hover:opacity-100 cursor-pointer rounded-sm minimap-bar"
+                             style={{ top: `${topPct}%`, height: `${heightPct}%` }}
+                             title={`Patch: ${h.label || '#' + (h.id + 1)}`}
+                             onClick={() => { if(sourceRef.current) sourceRef.current.scrollTop = (h.start * 20) - 50; }} />
+                    );
+                });
+            };
+
+            const isHTML = preview.trim().startsWith('<');
+            const showRender = renderMode === 'render' || (renderMode === 'auto' && isHTML);
+            
+            useEffect(() => {
+                if (showRender && iframeRef.current) {
+                    const blob = new Blob([preview], { type: 'text/html' });
+                    iframeRef.current.src = URL.createObjectURL(blob);
+                }
+            }, [preview, showRender]);
+
+            return (
+                <div className="flex flex-col h-screen bg-slate-900 text-slate-300 font-sans relative">
+                    
+                    {/* HELP MODAL */}
+                    {showHelp && (
+                        <div className="absolute inset-0 z-[100] flex items-center justify-center p-8 glass-panel animate-in fade-in duration-200">
+                            <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-4xl w-full p-6 relative">
+                                <button onClick={() => setShowHelp(false)} className="absolute top-4 right-4 text-slate-400 hover:text-white hover:rotate-90 transition-all"><i className="fa-solid fa-xmark text-xl"></i></button>
+                                <h2 className="text-xl font-bold text-white mb-6 flex items-center gap-2"><i className="fa-solid fa-book text-blue-500"></i> Patch Format Guide</h2>
+                                
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div className="space-y-4">
+                                        <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                            <div className="text-xs font-bold text-emerald-400 mb-2 uppercase tracking-wider">1. Standard Block</div>
+                                            <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
+{`<<<< SEARCH
+  const a = 1;
+  const b = 2;
+==== REPLACE
+  const a = 10;
+  const b = 20;
+>>>>`}
+                                            </pre>
+                                        </div>
+                                        <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                            <div className="text-xs font-bold text-blue-400 mb-2 uppercase tracking-wider">2. Line Numbers</div>
+                                            <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
+{`<<<< SEARCH
+#100
+:
+#105
+==== REPLACE
+  // Replaces lines 100-105
+  newCode();
+>>>>`}
+                                            </pre>
+                                        </div>
+                                    </div>
+                                    <div className="space-y-4">
+                                        <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                            <div className="text-xs font-bold text-purple-400 mb-2 uppercase tracking-wider">3. Range Anchors</div>
+                                            <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
+{`<<<< SEARCH
+  <div id="start">
+>>
+  </div> <!-- end -->
+==== REPLACE
+  <div id="new"></div>
+>>>>`}
+                                            </pre>
+                                            <p className="text-[9px] text-slate-500 mt-2">Finds 'start' anchor, then finds 'end' anchor after it. Replaces everything between (inclusive).</p>
+                                        </div>
+                                        <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                            <div className="text-xs font-bold text-amber-400 mb-2 uppercase tracking-wider">4. Chained & Forgiving</div>
+                                            <pre class="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
+{`<<<< SEARCH
+  old block 1
+==== REPLACE
+  new block 1
+<<<< SEARCH
+  old block 2
+==== REPLACE
+  new block 2`}
+                                            </pre>
+                                            <p className="text-[9px] text-slate-500 mt-2">Headers and closing tags (&gt;&gt;&gt;&gt;) are totally optional. Seamlessly paste multiple stacked blocks.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* TOOLBAR */}
+                    <header className="h-14 bg-slate-950 border-b border-slate-800 flex items-center justify-between px-4 shrink-0 z-50">
+                        <div className="flex items-center gap-3">
+                            <div className="bg-blue-600 text-white w-8 h-8 rounded-lg flex items-center justify-center font-bold text-lg">D</div>
+                            <h1 className="font-bold text-slate-100 tracking-wide text-sm hidden md:block">Differ <span className="text-slate-500 font-normal">v2.7</span></h1>
+                            <div className="flex gap-2 ml-4">
+                                {stats.matched > 0 && <span className="text-xs px-2 py-1 rounded bg-emerald-950/50 border border-emerald-900 text-emerald-400 font-mono">MATCH: {stats.matched}</span>}
+                                {stats.failed > 0 && <span className="text-xs px-2 py-1 rounded bg-rose-950/50 border border-rose-900 text-rose-400 font-mono">ERR: {stats.failed}</span>}
+                            </div>
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={() => setShowHelp(!showHelp)} className={`w-8 h-8 flex items-center justify-center rounded text-xs font-bold border transition-all ${showHelp ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-transparent border-slate-800 text-slate-500'}`}>?</button>
+                            <div className="w-px h-6 bg-slate-800 mx-1"></div>
+                            <button onClick={() => setShowInputColumn(!showInputColumn)} className={`px-3 py-1.5 rounded text-xs font-bold border transition-all ${showInputColumn ? 'bg-slate-800 border-slate-600 text-white' : 'bg-transparent border-slate-800 text-slate-500'}`}>Inputs</button>
+                            <button onClick={() => setShowLineNumbers(!showLineNumbers)} className={`w-8 h-8 flex items-center justify-center rounded text-xs font-bold border transition-all ${showLineNumbers ? 'bg-slate-800 border-slate-600 text-white' : 'bg-transparent border-slate-800 text-slate-500'}`}>#</button>
+                            <button onClick={() => setShowMiniMap(!showMiniMap)} className={`px-3 py-1.5 rounded text-xs font-bold border transition-all ${showMiniMap ? 'bg-slate-800 border-slate-600 text-white' : 'bg-transparent border-slate-800 text-slate-500'}`}>Map</button>
+                            <div className="w-px h-6 bg-slate-800 mx-2"></div>
+                            <button onClick={applyAll} disabled={stats.matched === 0} className={`px-4 py-1.5 rounded font-bold text-xs uppercase tracking-widest transition-all ${stats.matched > 0 ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-900/20' : 'bg-slate-800 text-slate-600 cursor-not-allowed'}`}>
+                                Apply All
+                            </button>
+                        </div>
+                    </header>
+
+                    {/* MAIN GRID */}
+                    <div className="flex-grow flex overflow-hidden divide-x divide-slate-800 relative">
+                        {/* COL 1: INPUT */}
+                        <div className={`flex flex-col bg-slate-950 transition-all duration-300 ${showInputColumn ? 'w-1/4 min-w-[280px]' : 'w-0 opacity-0 overflow-hidden'}`}>
+                            <div className="h-1/2 flex flex-col border-b border-slate-800">
+                                <div className="h-8 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-3">
+                                    <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">1. Patch Input</span>
+                                    <button onClick={() => setPatchesRaw('')} className="text-[10px] text-slate-500 hover:text-white">CLEAR</button>
+                                </div>
+                                <textarea value={patchesRaw} onChange={(e) => setPatchesRaw(e.target.value)} className="flex-grow bg-transparent p-4 text-xs font-mono text-amber-100/80 resize-none focus:outline-none focus:bg-slate-900/50 transition-colors" placeholder="Paste patches here..." spellCheck="false"></textarea>
+                                <div className="bg-slate-900 text-[9px] text-slate-500 px-2 py-1 flex justify-between border-t border-slate-800">
+                                    <span>Raw Blocks: {patchesRaw.split('<<<< SEARCH').length - 1}</span>
+                                    <span>Parsed: {parsedPatches.length}</span>
+                                </div>
+                            </div>
+                            <div className="h-1/2 overflow-y-auto bg-slate-900 p-2 space-y-1">
+                                <div className="text-[9px] font-bold text-slate-500 uppercase px-2 mb-1 flex justify-between"><span>Queue ({parsedPatches.length})</span><span>Manage</span></div>
+                                {parsedPatches.map((p, i) => (
+                                    <div key={i} className={`queue-item text-[10px] p-2 rounded border flex gap-2 items-start relative overflow-hidden ${p.status === 'success' ? 'bg-emerald-950/30 border-emerald-900 text-emerald-400' : (p.status === 'disabled' ? 'bg-slate-800 border-slate-700 text-slate-500 opacity-60' : 'bg-rose-950/30 border-rose-900 text-rose-400')}`}>
+                                        <input type="checkbox" checked={p.status !== 'disabled'} onChange={() => togglePatch(p.id)} className="mt-0.5 cursor-pointer"/>
+                                        <div className="min-w-0 flex-1">
+                                            <div className="flex justify-between"><strong className="truncate">{p.label || `Patch #${i+1}`}</strong><span>{p.status === 'success' ? `L:${p.line}` : ''}</span></div>
+                                            <div className="opacity-50 mt-1 font-mono truncate">{p.search.substring(0, 40).replace(/\n/g, ' ')}...</div>
+                                        </div>
+                                        {p.status === 'success' && (<div className="queue-actions absolute inset-y-0 right-0 bg-slate-900/90 pl-2 flex items-center pr-2"><button onClick={() => applySinglePatch(p.id)} className="bg-blue-600 text-white px-2 py-1 rounded text-[9px] font-bold uppercase hover:bg-blue-500 shadow-sm">Commit</button></div>)}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* COL 2: SOURCE */}
+                        <div className="flex-1 flex flex-col bg-[#0f172a] relative min-w-0 group">
+                            {activeHoverMatch && (
+                                <div className="absolute top-4 right-16 z-40 bg-emerald-900/90 border border-emerald-500/50 text-emerald-100 p-3 rounded-lg shadow-xl backdrop-blur-sm max-w-sm pointer-events-none z-50">
+                                    <div className="flex justify-between items-center mb-1"><span className="text-[10px] font-black uppercase tracking-widest text-emerald-400">{activeHoverMatch.label || `Patch #${activeHoverMatch.id + 1}`}</span><span className="text-[9px] font-mono opacity-70">Ln {activeHoverMatch.start + 1}</span></div>
+                                    <div className="text-xs font-mono border-t border-emerald-500/30 pt-2 mt-1 opacity-90 line-clamp-3">REPLACING WITH:<br/>{activeHoverMatch.replace.substring(0, 100)}...</div>
+                                </div>
+                            )}
+                            <div className="relative flex-grow flex overflow-hidden">
+                                {showLineNumbers && (<div ref={gutterRef} className="w-12 bg-slate-900 text-slate-500 text-right pr-3 pt-4 select-none editor-font overflow-hidden border-r border-slate-800 z-10 flex-shrink-0">{source.split('\n').map((_, i) => <div key={i} className="h-5">{i + 1}</div>)}<div className="h-[50vh]"></div></div>)}
+                                <div className="flex-1 relative overflow-hidden">
+                                    <div ref={backdropRef} className="absolute inset-0 p-4 pointer-events-none editor-font text-transparent opacity-100 z-0">{renderHighlights()}</div>
+                                    <textarea ref={sourceRef} value={source} onChange={(e) => setSource(e.target.value)} onScroll={handleScroll} className="absolute inset-0 w-full h-full bg-transparent p-4 text-slate-300 focus:outline-none resize-none z-10 editor-font" spellCheck="false"></textarea>
+                                </div>
+                                {showMiniMap && <div className="w-4 bg-slate-900/50 border-l border-slate-800 h-full relative z-20" ref={mapRef}>{renderMiniMap()}</div>}
+                            </div>
+                        </div>
+
+                        {/* COL 3: PREVIEW */}
+                        <div className="w-1/3 min-w-[300px] flex flex-col bg-[#0b1221] border-l border-slate-800">
+                            <div className="h-8 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-3">
+                                <span className="text-[10px] font-bold uppercase tracking-widest text-blue-500">Result</span>
+                                <div className="flex gap-2">
+                                    <button onClick={() => setRenderMode('code')} className={`px-2 py-0.5 rounded text-[9px] font-bold ${!showRender ? 'bg-blue-600 text-white' : 'text-slate-500 hover:text-white'}`}>CODE</button>
+                                    <button onClick={() => setRenderMode('render')} className={`px-2 py-0.5 rounded text-[9px] font-bold ${showRender ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:text-white'}`}>RENDER</button>
+                                    <button onClick={() => navigator.clipboard.writeText(preview)} className="text-[10px] text-blue-500 hover:text-white ml-2">COPY</button>
+                                </div>
+                            </div>
+                            <div className="flex-grow overflow-hidden relative">
+                                {showRender ? <iframe ref={iframeRef} className="preview-frame" sandbox="allow-scripts allow-same-origin allow-modals"></iframe> : <div className="h-full overflow-auto p-4 text-slate-400 editor-font whitespace-pre">{preview}</div>}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
