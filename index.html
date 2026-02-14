@@ -3,10 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Differ V3.0 | Sandbox Engine</title>
+    <title>Differ V3.1 | History & Audit</title>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+    <!-- Updated to Babel 7 (standalone) to support React Fragments and modern syntax -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/diff@5.1.0/dist/diff.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     
@@ -40,20 +42,6 @@
         /* Help Modal */
         .glass-panel { background: rgba(15, 23, 42, 0.95); backdrop-filter: blur(10px); }
     </style>
-    <link rel="manifest" href="manifest.json">
-    
-<script>
-    if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-            navigator.serviceWorker.register('./sw.js').then(reg => {
-                console.log('Differ Service Worker Registered!', reg.scope);
-            }).catch(err => {
-                console.warn('Differ Service Worker Failed:', err);
-            });
-        });
-    }
-</script>
-    
 </head>
 <body>
     <div id="root"></div>
@@ -108,11 +96,17 @@
         <h1 style="color: #4ade80">Welcome Back, User</h1>`;
 
         // --- V3.0 SANDBOX POLYFILL ENGINE ---
-        // Dynamically injected into the preview Iframe to emulate browser storage APIs.
-        // Prevents execution crashes caused by opaque Blob origin restrictions.
-        const SANDBOX_POLYFILL = '<script>\n' +
+const SANDBOX_POLYFILL = '<script>\n' +
             '(function() {\n' +
             '    try {\n' +
+            '        const hookConsole = (method) => {\n' +
+            '            const original = console[method];\n' +
+            '            console[method] = (...args) => {\n' +
+            '                window.parent.postMessage({ type: "DIFFER_LOG", method, payload: args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)) }, "*");\n' +
+            '                original.apply(console, args);\n' +
+            '            };\n' +
+            '        };\n' +
+            '        ["log", "warn", "error", "info"].forEach(hookConsole);\n' +
             '        const store = {};\n' +
             '        const mock = {\n' +
             '            getItem: k => store.hasOwnProperty(k) ? store[k] : null,\n' +
@@ -143,37 +137,183 @@
             const [parsedPatches, setParsedPatches] = useState([]);
             const [disabledPatches, setDisabledPatches] = useState(new Set()); 
             const [preview, setPreview] = useState("");
-            const [stats, setStats] = useState({ total: 0, matched: 0, failed: 0 });
+const [stats, setStats] = useState({ total: 0, matched: 0, failed: 0, applied: 0 });
             const [visualHighlights, setVisualHighlights] = useState([]);
 
             // History State
             const [undoStack, setUndoStack] = useState([]);
             const [redoStack, setRedoStack] = useState([]);
+            const [patchLog, setPatchLog] = useState(() => {
+                const saved = safeStorage.getItem('differ_patch_log');
+                return saved ? JSON.parse(saved) : [];
+            });
             
             // View State
             const [showInputColumn, setShowInputColumn] = useState(true);
             const [showMiniMap, setShowMiniMap] = useState(true);
             const [showLineNumbers, setShowLineNumbers] = useState(true);
+const [showLoadMenu, setShowLoadMenu] = useState(false);
             const [showHelp, setShowHelp] = useState(false);
-            const [renderMode, setRenderMode] = useState('auto');
-            const [activeHoverMatch, setActiveHoverMatch] = useState(null);
+const [renderMode, setRenderMode] = useState('live'); // 'live' | 'committed' | 'code'
+const [ignoreIndentation, setIgnoreIndentation] = useState(true);
+const [parserMode, setParserMode] = useState('smart'); // 'smart' | 'strict'
+const [activeHoverMatch, setActiveHoverMatch] = useState(null);
+const [activeHighlight, setActiveHighlight] = useState(null); // { start, end } for focused block
+            const [leftTab, setLeftTab] = useState('queue'); // 'queue' | 'history'
+const [showDiff, setShowDiff] = useState(false);
+            const [wordWrap, setWordWrap] = useState(false);
+            const fileInputRef = useRef(null);
+            
+// Resizing State (Persistent)
+            const [inputWidth, setInputWidth] = useState(parseInt(safeStorage.getItem('differ_w_input')) || 320);
+            const [resultWidth, setResultWidth] = useState(parseInt(safeStorage.getItem('differ_w_result')) || 400);
+            const [queueHeight, setQueueHeight] = useState(parseInt(safeStorage.getItem('differ_h_queue')) || 300);
+            const [isResizingH, setIsResizingH] = useState(false);
+            const [isResizingR, setIsResizingR] = useState(false);
+const [isResizingV, setIsResizingV] = useState(false);
+            const [isAiGenerating, setIsAiGenerating] = useState(false);
+            const [aiError, setAiError] = useState(null);
+            const [aiPrompt, setAiPrompt] = useState("");
+const [selectedProvider, setSelectedProvider] = useState(safeStorage.getItem('differ_provider') || 'gemini');
+            const [availableModels, setAvailableModels] = useState([]);
+const [selectedModel, setSelectedModel] = useState(safeStorage.getItem('differ_model') || '');
+const [showApiModal, setShowApiModal] = useState(false);
+const [showSupportModal, setShowSupportModal] = useState(false);
+const [showIndexMenu, setShowIndexMenu] = useState(false);
+            const [consoleLogs, setConsoleLogs] = useState([]);
+            const [showConsole, setShowConsole] = useState(false);
+            const [externalWindow, setExternalWindow] = useState(null);
+            
+// Project Mode
+            const [projectFiles, setProjectFiles] = useState([]);
+const [currentFileName, setCurrentFileName] = useState(null);
+            const [activeFileHandle, setActiveFileHandle] = useState(null);
+            const [fileStatus, setFileStatus] = useState(null); // 'saving', 'saved', 'error'
+const [projectContext, setProjectContext] = useState("");
+            const [isSyncing, setIsSyncing] = useState(false);
+            const [showFileMenu, setShowFileMenu] = useState(false);
+            const [showSyncMenu, setShowSyncMenu] = useState(false);
+            const [contextSelection, setContextSelection] = useState(new Set());
 
-            // Refs
+            // Reset context when folder changes
+            useEffect(() => {
+                setContextSelection(new Set());
+                setProjectContext("");
+            }, [projectFiles]);
+
+            useEffect(() => {
+                // NOTE: PayPal SDK is disabled in the editor preview to prevent "window host" errors.
+                // It will function correctly when exported and deployed to a real environment.
+            }, [showSupportModal]);
+            const [codeIndex, setCodeIndex] = useState([]);
+            const [indexFilters, setIndexFilters] = useState({ defs: true, regions: true, events: true, iife: true });
+            const [apiKeys, setApiKeys] = useState(() => {
+                const saved = safeStorage.getItem('differ_api_keys');
+                return saved ? JSON.parse(saved) : { gemini: '', openai: '', xai: '', claude: '', local: 'http://localhost:11434/v1' };
+            });
+
+// Refs
             const sourceRef = useRef(null);
+            const savedContentRef = useRef(null); // For Auto-Save tracking
             const backdropRef = useRef(null);
             const gutterRef = useRef(null);
             const mapRef = useRef(null);
             const iframeRef = useRef(null);
+            const measureRef = useRef(null); // For wrap calculation
+            const [lineHeights, setLineHeights] = useState({});
 
-            // Persist
+// Persist
             useEffect(() => { safeStorage.setItem('differ_source', source); }, [source]);
-            useEffect(() => { safeStorage.setItem('differ_patches', patchesRaw); }, [patchesRaw]);
+            useEffect(() => { safeStorage.setItem('differ_w_input', inputWidth); }, [inputWidth]);
+            useEffect(() => { safeStorage.setItem('differ_w_result', resultWidth); }, [resultWidth]);
+useEffect(() => { safeStorage.setItem('differ_h_queue', queueHeight); }, [queueHeight]);
+
+            // --- AUTO-SAVE ENGINE ---
+            useEffect(() => {
+                // Only save if file is mounted and content has changed from last save
+                if (!activeFileHandle || source === savedContentRef.current) return;
+                
+                const t = setTimeout(() => {
+                    saveFile();
+                }, 1500); // Auto-save after 1.5s idle
+                
+                return () => clearTimeout(t);
+            }, [source, activeFileHandle]);
+
+            // Resize Handlers
+            useEffect(() => {
+                const handleMouseMove = (e) => {
+                    if (isResizingH) {
+                        // Limit input width so source stays at least 300px
+                        const maxW = window.innerWidth - resultWidth - 300;
+                        const newWidth = Math.max(180, Math.min(e.clientX, maxW));
+                        setInputWidth(newWidth);
+                    }
+                    if (isResizingR) {
+                        // Limit result width so source stays at least 300px
+                        const maxW = window.innerWidth - inputWidth - 300;
+                        const newWidth = Math.max(250, Math.min(window.innerWidth - e.clientX, maxW));
+                        setResultWidth(newWidth);
+                    }
+                    if (isResizingV) {
+                        const headerHeight = 56;
+                        const newHeight = Math.max(100, Math.min(e.clientY - headerHeight, window.innerHeight * 0.8));
+                        setQueueHeight(newHeight);
+                    }
+                };
+                const handleMouseUp = () => {
+                    setIsResizingH(false);
+                    setIsResizingR(false);
+                    setIsResizingV(false);
+                };
+                if (isResizingH || isResizingR || isResizingV) {
+                    window.addEventListener('mousemove', handleMouseMove);
+                    window.addEventListener('mouseup', handleMouseUp);
+                }
+                return () => {
+                    window.removeEventListener('mousemove', handleMouseMove);
+                    window.removeEventListener('mouseup', handleMouseUp);
+                };
+            }, [isResizingH, isResizingR, isResizingV, inputWidth, resultWidth]);
+useEffect(() => { safeStorage.setItem('differ_patches', patchesRaw); }, [patchesRaw]);
+            useEffect(() => { safeStorage.setItem('differ_patch_log', JSON.stringify(patchLog)); }, [patchLog]);
+
+            // --- DETACHED WINDOW MONITOR ---
+            useEffect(() => {
+                if (!externalWindow) return;
+                const timer = setInterval(() => {
+                    if (externalWindow.closed) {
+                        setExternalWindow(null);
+                    }
+                }, 500);
+                return () => clearInterval(timer);
+            }, [externalWindow]);
 
             // --- HISTORY ENGINE ---
             const pushHistory = (newSource) => {
                 setUndoStack(prev => [...prev, source]);
                 setRedoStack([]); 
                 setSource(newSource);
+            };
+
+const logPatches = (appliedPatches) => {
+                const timestamp = new Date().toISOString();
+                
+                setPatchLog(prev => {
+                    const baseIndex = prev.length;
+                    
+                    const newLogs = appliedPatches.map((p, i) => {
+                        const logNumber = baseIndex + i + 1;
+                        return {
+                            uid: Date.now() + Math.random() + i,
+                            ts: timestamp,
+                            label: p.label || `Patch #${logNumber}`,
+                            raw: p.rawBlock
+                        };
+                    });
+                    
+                    return [...newLogs, ...prev];
+                });
             };
 
             const handleUndo = () => {
@@ -192,30 +332,80 @@
                 setSource(nextSource);
             };
 
+            // --- WRAP SYNC ENGINE ---
+            useEffect(() => {
+                if (!wordWrap) return;
+                
+                const syncHeight = () => {
+                    if (!measureRef.current || !sourceRef.current) return;
+                    
+                    // Match width exactly (textarea clientWidth includes padding)
+                    measureRef.current.style.width = sourceRef.current.clientWidth + 'px';
+                    measureRef.current.innerHTML = '';
+                    
+                    source.split('\n').forEach((line, i) => {
+                        const d = document.createElement('div');
+                        d.textContent = line || '\u200B'; // Zero-width space preserves height
+                        measureRef.current.appendChild(d);
+                    });
+                    
+                    const heights = {};
+                    Array.from(measureRef.current.children).forEach((child, i) => {
+                        heights[i] = child.offsetHeight;
+                    });
+                    setLineHeights(heights);
+                };
+
+                const t = setTimeout(syncHeight, 50); // Debounce
+                window.addEventListener('resize', syncHeight);
+                return () => { window.removeEventListener('resize', syncHeight); clearTimeout(t); };
+            }, [source, wordWrap, showInputColumn, showDiff]);
+
             // --- MAIN ENGINE (Debounced for Monolith Support) ---
+useEffect(() => {
+                const handleMessage = (e) => {
+                    if (e.data && e.data.type === "DIFFER_LOG") {
+                        setConsoleLogs(prev => [...prev, { ts: new Date().toLocaleTimeString(), ...e.data }].slice(-50));
+                    }
+                };
+                window.addEventListener('message', handleMessage);
+                return () => window.removeEventListener('message', handleMessage);
+}, []);
+
+// V3.1: Highlight persists until user interaction (Edit/Scroll)
+            // (Auto-fade removed to allow Copy/Paste time)
+
             useEffect(() => {
                 const timerId = setTimeout(() => {
-                    const rawList = parseRawPatches(patchesRaw);
-                    const result = processPatches(source, rawList, disabledPatches);
-                    
-                    setParsedPatches(result.patches);
+        const rawList = parseRawPatches(patchesRaw, parserMode);
+        const result = processPatches(source, rawList, disabledPatches, ignoreIndentation);
+        
+        setParsedPatches(result.patches);
                     setPreview(result.finalCode);
                     setStats(result.stats);
 
-                    const highlights = scanForHighlights(source, rawList);
-                    setVisualHighlights(highlights);
-                }, 300);
+const highlights = scanForHighlights(source, rawList, ignoreIndentation);
+        setVisualHighlights(highlights);
+    }, 300);
 
-                return () => clearTimeout(timerId);
-            }, [source, patchesRaw, disabledPatches]);
+    return () => clearTimeout(timerId);
+}, [source, patchesRaw, disabledPatches, ignoreIndentation, parserMode, patchLog]);
 
-            // --- V2.8: Inception-Proof Forgiving Parsers ---
+            // --- V3.5: Variable-Fence Parsing (Deep-Inception Support) ---
 
-            const parseRawPatches = (input) => {
+            const parseRawPatches = (input, mode) => {
                 const list = [];
-                // V2.8 Logic: Prioritizes explicit '>>>>' closer; falls back to lookahead for headers/EOF.
-                // This allows REPLACE blocks to contain '<<<< SEARCH' (essential for patching Differ itself).
-                const regex = /(?:--- PATCH\s*(.*?)\s*---)?\s*<<<< SEARCH\s*([\s\S]*?)\s*==== REPLACE\s*([\s\S]*?)(?:\s*>>>>|(?=\s*--- PATCH\b|$))/gi;
+                const P_HEAD = "---" + " PATCH";
+                
+                // Matches standard (4) or extended (5+) fences. 
+                // Capture Group 2 gets the fence (e.g. "<<<<<") to verify matching closing tags if we wanted strictness,
+                // but for now we accept mixed lengths to be forgiving, relying on "Strict Mode" for precision.
+                const terminator = mode === 'strict' 
+                    ? '\\s*>{4,}' 
+                    : `(?:\\s*>{4,}|(?=\\n\\s*${P_HEAD}\\s+.*?---\\s*\\n\\s*<{4,} SEARCH)|$)`;
+                
+                // Now matches <{4,} (4 or more) for SEARCH/REPLACE/END
+                const regex = new RegExp(`(?:${P_HEAD}\\s*(.*?)\\s*---)?\\s*(<{4,}) SEARCH\\s*([\\s\\S]*?)\\s*={4,} REPLACE\\s*([\\s\\S]*?)${terminator}`, 'gi');
                 
                 let match;
                 let idx = 0;
@@ -225,8 +415,8 @@
                     list.push({
                         id: idx++,
                         label: match[1] ? match[1].trim() : null,
-                        search: match[2],
-                        replace: match[3].replace(/^\r?\n/, '').replace(/\r?\n$/, ''),
+                        search: match[3], // Shifted due to fence capture group
+                        replace: match[4].replace(/^\r?\n/, '').replace(/\r?\n$/, ''),
                         rawBlock: match[0],
                         fullMatchIndex: match.index
                     });
@@ -234,61 +424,56 @@
                 return list;
             };
 
-            const findBestMatch = (fullText, chunk) => {
-                // STRATEGY 1: Line Numbers (#10 : #20)
+const findBestMatch = (fullText, chunk, ignoreIndent = ignoreIndentation) => {
+                const normalize = (str) => {
+                    if (!ignoreIndent) return str;
+                    return str.replace(/[ \t]+/g, ' ').replace(/[()[\]{}:,;]/g, m => ` ${m} `).replace(/[ \t]+/g, ' ').trim();
+                };
+
+                // STRATEGY 1: Line Numbers (#Start:#End)
                 const lineRegex = /^\s*#(\d+)\s*:\s*#(\d+)\s*$/;
                 const lineMatch = chunk.match(lineRegex);
                 if (lineMatch) {
                     const srcLines = fullText.split('\n');
                     const startLine = parseInt(lineMatch[1], 10) - 1;
                     const endLine = parseInt(lineMatch[2], 10);
-                    
-                    if (startLine < 0 || endLine > srcLines.length || startLine >= endLine) {
-                        return { found: false, reason: `Invalid Range #${lineMatch[1]}-#${lineMatch[2]}` };
-                    }
-
+                    if (startLine < 0 || endLine > srcLines.length || startLine >= endLine) return { found: false, reason: "Invalid Range" };
                     const preText = srcLines.slice(0, startLine).join('\n') + (startLine > 0 ? '\n' : '');
                     const targetText = srcLines.slice(startLine, endLine).join('\n');
-                    
                     return { found: true, start: preText.length, end: preText.length + targetText.length };
                 }
 
-                // STRATEGY 2: Range Anchors (Top >> Bottom)
-                const anchorSplit = chunk.split(/\r?\n\s*>>\s*\r?\n/);
+// STRATEGY 2: Range Anchors (Top >> Bottom)
+// V3.5: Extreme anchor split (handles start-of-block, varied newlines, and trailing whitespace)
+                const anchorSplit = chunk.split(/(?:\r?\n|^)[ \t]*>>[ \t]*(?:\r?\n|$)/);
                 if (anchorSplit.length === 2) {
-                    const topAnchor = anchorSplit[0].trim();
-                    const btmAnchor = anchorSplit[1].trim();
-                    
-                    const topIdx = fullText.indexOf(topAnchor);
-                    if (topIdx === -1) return { found: false, reason: "Start anchor not found" };
-                    
-                    const searchFrom = topIdx + topAnchor.length;
-                    const btmIdx = fullText.indexOf(btmAnchor, searchFrom);
-                    if (btmIdx === -1) return { found: false, reason: "End anchor not found after start" };
-                    
-                    return { found: true, start: topIdx, end: btmIdx + btmAnchor.length };
+                    const topMatch = findBestMatch(fullText, anchorSplit[0], ignoreIndent);
+                    if (!topMatch.found) return { found: false, reason: "Start anchor not found" };
+                    const searchFrom = topMatch.end;
+                    const btmMatch = findBestMatch(fullText.substring(searchFrom), anchorSplit[1], ignoreIndent);
+                    if (!btmMatch.found) return { found: false, reason: "End anchor not found after start" };
+                    return { found: true, start: topMatch.start, end: searchFrom + btmMatch.end };
                 }
 
                 // STRATEGY 3: Standard Block Match (Exact & Soft)
                 const cleanChunk = chunk.replace(/^\r?\n/, '').replace(/\r?\n$/, '');
-                
-                const exactIdx = fullText.indexOf(cleanChunk);
-                if (exactIdx !== -1) return { found: true, start: exactIdx, end: exactIdx + cleanChunk.length };
+                if (!ignoreIndent) {
+                    const exactIdx = fullText.indexOf(cleanChunk);
+                    if (exactIdx !== -1) return { found: true, start: exactIdx, end: exactIdx + cleanChunk.length };
+                }
 
                 const srcLines = fullText.split('\n');
-                const chunkLines = cleanChunk.split('\n').map(l => l.trim()).filter(l => l !== '');
+                const chunkLines = cleanChunk.split('\n').map(l => normalize(l)).filter(l => !ignoreIndent || l !== '');
                 if (chunkLines.length === 0) return { found: false, reason: "Empty search block" };
 
+                const firstChunkLine = chunkLines[0];
                 for (let i = 0; i < srcLines.length; i++) {
-                    if (srcLines[i].trim() === chunkLines[0]) {
-                        let match = true;
-                        let offset = 0;
-                        for (let j = 1; j < chunkLines.length; j++) {
-                            while (i + offset + 1 < srcLines.length && srcLines[i + offset + 1].trim() === '') offset++;
-                            if (i + offset + 1 >= srcLines.length || srcLines[i + offset + 1].trim() !== chunkLines[j]) {
-                                match = false; break;
-                            }
-                            offset++;
+                    if (normalize(srcLines[i]) === firstChunkLine) {
+                        let match = true, offset = 0, chunkIdx = 1;
+                        while (chunkIdx < chunkLines.length) {
+                            if (ignoreIndent) while (i + offset + 1 < srcLines.length && normalize(srcLines[i + offset + 1]) === '') offset++;
+                            if (i + offset + 1 >= srcLines.length || normalize(srcLines[i + offset + 1]) !== chunkLines[chunkIdx]) { match = false; break; }
+                            offset++; chunkIdx++;
                         }
                         if (match) {
                             const startLineIdx = i;
@@ -299,7 +484,6 @@
                         }
                     }
                 }
-                
                 return { found: false, reason: "No match found" };
             };
 
@@ -317,11 +501,12 @@
                 return ranges;
             };
 
-            const processPatches = (srcCode, patchList, disabledSet) => {
+const processPatches = (srcCode, patchList, disabledSet) => {
                 const processed = [];
                 let modifiedCode = srcCode;
                 let matchedCount = 0;
                 let failedCount = 0;
+                let appliedCount = 0;
 
                 patchList.forEach(p => {
                     const info = { ...p };
@@ -331,7 +516,7 @@
                         return;
                     }
 
-                    const matchResult = findBestMatch(modifiedCode, p.search);
+const matchResult = findBestMatch(modifiedCode, p.search);
                     if (matchResult.found) {
                         matchedCount++;
                         const pre = modifiedCode.substring(0, matchResult.start);
@@ -341,14 +526,28 @@
                         info.line = modifiedCode.substring(0, matchResult.start).split('\n').length;
                         processed.push(info);
                     } else {
-                        failedCount++;
-                        info.status = 'error';
-                        info.reason = matchResult.reason;
+                        // V3.4: Priority check - Is the replacement code actually there?
+                        const appliedMatch = findBestMatch(modifiedCode, p.replace);
+                        
+                        if (appliedMatch.found) {
+                            appliedCount++;
+                            info.status = 'applied';
+                            info.reason = 'Already in Code';
+                            info.line = modifiedCode.substring(0, appliedMatch.start).split('\n').length;
+                        } else {
+                            // If not in code, check log only as a secondary hint for the error reason
+                            const cleanRaw = p.rawBlock ? p.rawBlock.replace(/\r/g, '').trim() : '';
+                            const inLog = patchLog.some(l => l.raw && l.raw.replace(/\r/g, '').trim() === cleanRaw);
+                            
+                            failedCount++;
+                            info.status = 'error';
+                            info.reason = inLog ? "In Log, but missing from Code" : matchResult.reason;
+                        }
                         processed.push(info);
                     }
                 });
 
-                return { patches: processed, finalCode: modifiedCode, stats: { total: patchList.length, matched: matchedCount, failed: failedCount } };
+                return { patches: processed, finalCode: modifiedCode, stats: { total: patchList.length, matched: matchedCount, failed: failedCount, applied: appliedCount } };
             };
 
             // --- UI ACTIONS ---
@@ -366,7 +565,10 @@
                 if (matchResult.found) {
                     const pre = source.substring(0, matchResult.start);
                     const post = source.substring(matchResult.end);
+                    
                     pushHistory(pre + patchObj.replace + post);
+                    logPatches([patchObj]);
+                    
                     setPatchesRaw(patchesRaw.replace(patchObj.rawBlock, '').trim());
                     const newSet = new Set(disabledPatches);
                     newSet.delete(patchId);
@@ -375,19 +577,188 @@
             };
 
             const applyAll = () => {
+                // Find all enabled successful patches for logging
+                const toApply = parsedPatches.filter(p => p.status === 'success');
+                if (toApply.length === 0) return;
+
                 pushHistory(preview);
+                logPatches(toApply);
+                
                 setPatchesRaw("");
                 setDisabledPatches(new Set());
             };
+
+            const recallPatch = (raw) => {
+                const sep = patchesRaw.trim() ? '\n\n' : '';
+                setPatchesRaw(patchesRaw + sep + raw);
+                setLeftTab('queue');
+            };
+
+            const downloadLog = () => {
+                if (patchLog.length === 0) return;
+                const text = patchLog.map(l => `--- PATCH LOG: ${l.label} ---\n[Applied: ${l.ts}]\n\n${l.raw}`).join('\n\n');
+                const blob = new Blob([text], { type: 'text/plain' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `differ_audit_${new Date().toISOString().slice(0,10)}.txt`;
+                document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            };
+
+            const clearLog = () => {
+                setPatchLog([]);
+                safeStorage.setItem('differ_patch_log', '[]');
+            };
+
+const exportSession = () => {
+                const session = {
+                    source, patchesRaw, patchLog,
+                    settings: { showInputColumn, showMiniMap, showLineNumbers, renderMode, ignoreIndentation, parserMode }
+                };
+                const blob = new Blob([JSON.stringify(session, null, 2)], { type: 'application/json' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `differ_session_${new Date().toISOString().slice(0,10)}.json`;
+                document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            };
+
+const popOutResult = () => {
+                if (externalWindow && !externalWindow.closed) {
+                    externalWindow.focus();
+                    return;
+                }
+                const win = window.open('', '_blank', 'width=800,height=600');
+                if (!win) {
+                    alert("Pop-up blocked! Please allow pop-ups for this site.");
+                    return;
+                }
+win.document.write(`<html><head><title>Differ Result Preview</title></head><body style="margin:0;padding:0;overflow:hidden;background:#1e293b;"></body></html>`);
+                win.document.close();
+                setExternalWindow(win);
+            };
+
+            const downloadResult = () => {
+                const blob = new Blob([preview], { type: 'text/html' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `differ_result_${new Date().toISOString().slice(0,10)}.html`;
+                document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            };
+
+            const clearSource = () => {
+                if (window.confirm("Are you sure you want to clear the source code? This can be undone.")) {
+                    pushHistory('');
+                }
+            };
+
+            const importSession = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    try {
+                        const data = JSON.parse(ev.target.result);
+                        if (data.source) setSource(data.source);
+                        if (data.patchesRaw) setPatchesRaw(data.patchesRaw);
+                        if (data.patchLog) setPatchLog(data.patchLog);
+                        if (data.settings) {
+                            if (data.settings.parserMode) setParserMode(data.settings.parserMode);
+                            setIgnoreIndentation(!!data.settings.ignoreIndentation);
+                        }
+                    } catch (err) { alert('Invalid Session File'); }
+                };
+                reader.readAsText(file);
+                e.target.value = null; // reset
+            };
+
+const handleMountFolder = async () => {
+                setShowLoadMenu(false);
+                try {
+                    const dirHandle = await window.showDirectoryPicker();
+                    const files = [];
+                    for await (const entry of dirHandle.values()) {
+                        if (entry.kind === 'file') files.push(entry);
+                    }
+                    // Sort alphabetically
+                    files.sort((a, b) => a.name.localeCompare(b.name));
+                    setProjectFiles(files);
+                    if (files.length > 0) {
+                        // Optional: Load first file or just show selection state
+                        setCurrentFileName(`Mounted: ${dirHandle.name}`); 
+                    }
+                } catch (e) {
+                    console.error("Mount failed", e);
+                }
+            };
+
+const loadFile = async (fileHandle) => {
+                try {
+                    const file = await fileHandle.getFile();
+                    const text = await file.text();
+                    setSource(text);
+                    savedContentRef.current = text; // Sync ref so we don't auto-save immediately
+                    setCurrentFileName(fileHandle.name);
+                    setActiveFileHandle(fileHandle);
+                    setFileStatus(null);
+                    setShowFileMenu(false);
+                    // Reset history to prevent undoing into previous file
+                    setUndoStack([]); 
+                    setRedoStack([]);
+                } catch (e) {
+                    console.error("Load failed", e);
+                    alert("Could not read file: " + fileHandle.name);
+                }
+            };
+
+            const saveFile = async () => {
+                if (!activeFileHandle) return;
+                setFileStatus('saving');
+                try {
+                    const writable = await activeFileHandle.createWritable();
+                    await writable.write(source);
+                    await writable.close();
+                    savedContentRef.current = source; // Update known saved state
+                    setFileStatus('saved');
+                    setTimeout(() => setFileStatus(null), 2000);
+                } catch (e) {
+                    console.error("Save failed", e);
+                    setFileStatus('error');
+                    // Likely permission error or file lock
+                }
+            };
+
+            const handleSandboxLoad = () => {
+                setShowLoadMenu(false);
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.onchange = e => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = ev => setSource(ev.target.result);
+                    reader.readAsText(file);
+                };
+                input.click();
+            };
+
+// Performance: Map lines to highlights for O(1) lookup
+            const highlightsMap = useMemo(() => {
+                const map = new Map();
+                visualHighlights.forEach(h => {
+                    for (let i = h.start - 2; i <= h.end + 2; i++) map.set(i, h);
+                });
+                return map;
+            }, [visualHighlights]);
 
             const handleScroll = (e) => {
                 const top = e.target.scrollTop;
                 if (backdropRef.current) backdropRef.current.scrollTop = top;
                 if (gutterRef.current) gutterRef.current.scrollTop = top;
-                const lineHeight = 20;
-                const visibleLine = Math.floor(top / lineHeight);
-                const visibleMatch = visualHighlights.find(m => visibleLine >= m.start - 2 && visibleLine <= m.end + 2);
-                setActiveHoverMatch(visibleMatch || null);
+                
+                if (visualHighlights.length > 0) {
+                    const visibleLine = Math.floor(top / 20);
+                    const match = highlightsMap.get(visibleLine) || null;
+                    if (match !== activeHoverMatch) setActiveHoverMatch(match);
+                }
             };
 
             // V2.9: Virtualized Highlights (Reduces 10k nodes to just active highlights)
@@ -415,170 +786,884 @@
                 });
             };
 
-            // V2.9: Virtualized Line Numbers (Reduces 10k div nodes to a single string node)
-            const lineNumbersText = useMemo(() => {
+            // V2.9: Virtualized Line Numbers (Adaptive)
+            const lineNumbersElements = useMemo(() => {
                 const count = source.split('\n').length;
-                let text = '';
-                for(let i=1; i<=count; i++) text += i + '\n';
-                return text;
-            }, [source]);
+                return Array.from({ length: count }).map((_, i) => (
+                    <div key={i} style={{ height: wordWrap ? (lineHeights[i] || 20) : 20 }} className="leading-5">{i + 1}</div>
+                ));
+            }, [source, wordWrap, lineHeights]);
 
-            // V2.8 Robust HTML Detection
-            const isHTML = /^\s*<(!DOCTYPE|html)/i.test(preview);
-            const showRender = renderMode === 'render' || (renderMode === 'auto' && isHTML);
+// V3.3 Enhanced Detection
+            const isHTML = /^\s*<(!DOCTYPE|html|div|main|section|header|footer|svg)/i.test(preview.trim());
+            const showRender = renderMode === 'live' || renderMode === 'committed';
             
             // --- V3.0 RENDER EXECUTION ---
-            useEffect(() => {
+useEffect(() => {
                 let url;
-                if (showRender && iframeRef.current) {
-                    let processedPreview = preview;
-                    
-                    // Inject Sandbox Polyfill into the HTML
-                    if (isHTML) {
-                        if (/<head[^>]*>/i.test(processedPreview)) {
-                            processedPreview = processedPreview.replace(/(<head[^>]*>)/i, '$1\n' + SANDBOX_POLYFILL);
-                        } else if (/<html[^>]*>/i.test(processedPreview)) {
-                            processedPreview = processedPreview.replace(/(<html[^>]*>)/i, '$1\n<head>\n' + SANDBOX_POLYFILL + '</head>\n');
-                        } else {
-                            processedPreview = SANDBOX_POLYFILL + processedPreview;
-                        }
+                if (!showRender) return;
+                
+                // Choose content based on mode: Live (Patched) vs Committed (Source)
+                let content = renderMode === 'committed' ? source : preview;
+                
+                if (isHTML) {
+                    if (/<head[^>]*>/i.test(content)) {
+                        content = content.replace(/(<head[^>]*>)/i, '$1\n' + SANDBOX_POLYFILL);
+                    } else if (/<html[^>]*>/i.test(content)) {
+                        content = content.replace(/(<html[^>]*>)/i, '$1\n<head>\n' + SANDBOX_POLYFILL + '</head>\n');
+                    } else {
+                        content = SANDBOX_POLYFILL + content;
                     }
-
-                    const blob = new Blob([processedPreview], { type: 'text/html' });
-                    url = URL.createObjectURL(blob);
+                }
+                const blob = new Blob([content], { type: 'text/html' });
+                url = URL.createObjectURL(blob);
+                
+                if (iframeRef.current) {
                     iframeRef.current.src = url;
                 }
+
+if (externalWindow && !externalWindow.closed) {
+                        try {
+                            const doc = externalWindow.document;
+                            doc.title = `Differ Preview: ${renderMode.toUpperCase()}`;
+                            doc.body.innerHTML = '';
+                            const ifr = doc.createElement('iframe');
+                            ifr.style.cssText = "width:100%;height:100vh;border:none;background:white;";
+                            ifr.src = url;
+                            doc.body.appendChild(ifr);
+                        } catch(e) { /* Ignore cross-origin blocking during reload */ }
+                    }
+                
                 return () => { if (url) URL.revokeObjectURL(url); };
-            }, [preview, showRender]);
+            }, [preview, source, showRender, renderMode, externalWindow]);
 
-            return (
-                <div className="flex flex-col h-screen bg-slate-900 text-slate-300 font-sans relative">
+const fetchModels = async () => {
+                const key = apiKeys[selectedProvider];
+                if (!key && selectedProvider !== 'local') { setAvailableModels([]); return; }
+                
+                try {
+                    // Gemini (Google)
+                    if (selectedProvider === 'gemini') {
+                        const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${key}`;
+                        const res = await fetch(url);
+                        const data = await res.json();
+                        if (data.models) {
+                            const models = data.models
+                                .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent"))
+                                .map(m => m.name.replace('models/', ''));
+                            setAvailableModels(models);
+                            if (!models.includes(selectedModel)) setSelectedModel(models[0]);
+                        }
+                        return;
+                    }
+
+                    // Claude (Anthropic) - Static list as they lack a public discovery endpoint
+                    if (selectedProvider === 'claude') {
+                        const models = ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022', 'claude-3-opus-20240229'];
+                        setAvailableModels(models);
+                        if (!models.includes(selectedModel)) setSelectedModel(models[0]);
+                        return;
+                    }
+
+// OpenAI / xAI / Local (Ollama)
+                    let url, headers = { 'Content-Type': 'application/json' };
                     
-                    {/* HELP MODAL */}
-                    {showHelp && (
-                        <div className="absolute inset-0 z-[100] flex items-center justify-center p-8 glass-panel animate-in fade-in duration-200">
-                            <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-4xl w-full p-6 relative">
-                                <button onClick={() => setShowHelp(false)} className="absolute top-4 right-4 text-slate-400 hover:text-white hover:rotate-90 transition-all"><i className="fa-solid fa-xmark text-xl"></i></button>
-                                <h2 className="text-xl font-bold text-white mb-6 flex items-center gap-2"><i className="fa-solid fa-book text-blue-500"></i> Patch Format Guide</h2>
-                                
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                    <div className="space-y-4">
-                                        <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                                            <div className="text-xs font-bold text-emerald-400 mb-2 uppercase tracking-wider">1. Standard Block</div>
-                                            <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
-{`<<<< SEARCH
-  const a = 1;
-  const b = 2;
-==== REPLACE
-  const a = 10;
-  const b = 20;
->>>>`}
-                                            </pre>
-                                        </div>
-                                        <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                                            <div className="text-xs font-bold text-blue-400 mb-2 uppercase tracking-wider">2. Line Numbers</div>
-                                            <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
-{`<<<< SEARCH
-#100
-:
-#105
+                    if (selectedProvider === 'local') {
+                        // OLLAMA ROBUST FETCH STRATEGY
+                        let rawKey = key || 'http://localhost:11434';
+                        if (!/^https?:\/\//i.test(rawKey)) rawKey = 'http://' + rawKey; // Ensure protocol
+                        let baseUrl = rawKey.replace(/\/+$/, ''); // Remove trailing slash
+                        
+                        // Strategy 1: Try Native Endpoint (/api/tags) - Prioritized for reliability
+                        try {
+                            const nativeBase = baseUrl.replace(/\/v1$/, ''); 
+                            const nativeUrl = `${nativeBase}/api/tags`;
+                            const res = await fetch(nativeUrl, { headers });
+                            if (res.ok) {
+                                const data = await res.json();
+                                if (data.models) {
+                                    const models = data.models.map(m => m.name);
+                                    setAvailableModels(models);
+                                    if (!models.includes(selectedModel)) setSelectedModel(models[0]);
+                                    return;
+                                }
+                            }
+                        } catch (err) { console.log("Ollama /api/tags failed, trying v1...", err); }
 
-  newCode();
->>>>`}
-                                            </pre>
-                                        </div>
-                                    </div>
-                                    <div className="space-y-4">
-                                        <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                                            <div className="text-xs font-bold text-purple-400 mb-2 uppercase tracking-wider">3. Range Anchors</div>
-                                            <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
-{`<<<< SEARCH
-  <div id="start">
->>
-  </div>
-==== REPLACE
-  <div id="new"></div>
->>>>`}
-                                            </pre>
-                                        </div>
-                                        <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                                            <div className="text-xs font-bold text-amber-400 mb-2 uppercase tracking-wider">4. Meta-Patching (Inception)</div>
-                                            <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
-{`--- PATCH ---
+                        // Strategy 2: Try OpenAI-Compatible Endpoint (/v1/models)
+                        try {
+                            const v1Url = baseUrl.endsWith('/v1') ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
+                            const res = await fetch(v1Url, { headers });
+                            if (res.ok) {
+                                const data = await res.json();
+                                if (data.data && data.data.length > 0) {
+                                    const models = data.data.map(m => m.id);
+                                    setAvailableModels(models);
+                                    if (!models.includes(selectedModel)) setSelectedModel(models[0]);
+                                    return;
+                                }
+                            }
+                        } catch (err) { console.error("Ollama /v1/models failed.", err); }
+                        
+                        // If both fail
+                        setAvailableModels([]);
+                        return;
+                    } 
+                    
+                    // Cloud Providers
+                    else if (selectedProvider === 'openai') {
+                        url = 'https://api.openai.com/v1/models';
+                        headers['Authorization'] = `Bearer ${key}`;
+                    } else if (selectedProvider === 'xai') {
+                        url = 'https://api.x.ai/v1/models';
+                        headers['Authorization'] = `Bearer ${key}`;
+                    }
+
+                    const res = await fetch(url, { headers });
+                    const data = await res.json();
+                    
+                    let models = [];
+                    if (data.data) models = data.data.map(m => m.id);
+                    
+                    if (models.length > 0) {
+                        setAvailableModels(models);
+                        if (!models.includes(selectedModel)) setSelectedModel(models[0]);
+                    }
+                } catch (e) { 
+                    console.warn(`Model fetch failed for ${selectedProvider}`, e); 
+                    setAvailableModels([]); 
+                }
+            };
+
+useEffect(() => { fetchModels(); }, [selectedProvider, apiKeys]);
+
+// --- CODE INDEXER ENGINE ---
+            useEffect(() => {
+                const t = setTimeout(() => {
+                    const lines = source.split('\n');
+                    const index = [];
+                    
+                    // Helper to find block end by counting braces
+                    const findBlockEnd = (startLine) => {
+                        let open = 0;
+                        let started = false;
+                        for (let j = startLine; j < lines.length; j++) {
+                            const l = lines[j];
+                            const o = (l.match(/\{/g) || []).length;
+                            const c = (l.match(/\}/g) || []).length;
+                            if (o > 0) started = true;
+                            open += o;
+                            open -= c;
+                            if (started && open <= 0) return j;
+                        }
+                        return startLine; // Fallback
+                    };
+
+                    lines.forEach((line, i) => {
+                        const trim = line.trim();
+                        if (!trim) return;
+                        
+                        let item = null;
+                        
+                        // Regions / Markers
+                        if (/\/\/\s*(?:---|#region|TODO|FIXME)/i.test(trim)) {
+                            item = { line: i, end: i, type: 'regions', label: trim.replace(/^\/\/\s*/, '').substring(0, 30), icon: 'fa-bookmark', color: 'text-amber-500' };
+                        }
+                        // Function / Class Definitions
+                        else if (/(?:function\s+(\w+)|class\s+(\w+)|const\s+(\w+)\s*=\s*(?:async\s*)?(?:function|\([^)]*\)|[^\s=>]+)\s*=>)/.test(trim)) {
+                            const defMatch = trim.match(/(?:function\s+(\w+)|class\s+(\w+)|const\s+(\w+)\s*=\s*(?:async\s*)?(?:function|\([^)]*\)|[^\s=>]+)\s*=>)/);
+                            if (defMatch) {
+                                item = { line: i, end: findBlockEnd(i), type: 'defs', label: defMatch[1] || defMatch[2] || defMatch[3], icon: 'fa-cube', color: 'text-blue-400' };
+                            }
+                        }
+                        // IIFE
+                        else if (/^\(\s*(?:async\s*)?function/.test(trim) || /^\(\s*(?:async\s*)?\(\)\s*=>/.test(trim)) {
+                            item = { line: i, end: findBlockEnd(i), type: 'iife', label: '(IIFE)', icon: 'fa-bolt', color: 'text-purple-400' };
+                        }
+                        // Events
+                        else if (/\.addEventListener\(/.test(trim) || /\.on\w+\s*=/.test(trim)) {
+                            const evt = trim.match(/["']([^"']+)["']/) || [null, 'event'];
+                            const end = trim.includes('{') ? findBlockEnd(i) : i;
+                            item = { line: i, end: end, type: 'events', label: `on(${evt[1]})`, icon: 'fa-satellite-dish', color: 'text-rose-400' };
+                        }
+                        
+                        if (item) index.push(item);
+                    });
+                    setCodeIndex(index);
+                }, 600);
+                return () => clearTimeout(t);
+            }, [source]);
+
+const callAI = async (prompt, system) => {
+                let key = apiKeys[selectedProvider];
+                
+                // Allow empty key for local (fallback to default)
+                if (!key && selectedProvider === 'local') {
+                    key = 'http://localhost:11434';
+                }
+                if (!key) throw new Error(`No API key found for ${selectedProvider}`);
+
+                let url, body, headers = { 'Content-Type': 'application/json' };
+
+                if (selectedProvider === 'gemini') {
+                    const model = selectedModel || 'gemini-2.0-flash'; // Safer default
+                    url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+                    body = { contents: [{ parts: [{ text: prompt }] }], systemInstruction: { parts: [{ text: system }] } };
+                } else if (['openai', 'xai', 'local'].includes(selectedProvider)) {
+                    if (selectedProvider === 'local') {
+                        // Ensure protocol and strip trailing slash
+                        if (!/^https?:\/\//i.test(key)) key = 'http://' + key;
+                        key = key.replace(/\/+$/, '');
+                        url = key.endsWith('/v1') ? `${key}/chat/completions` : `${key}/v1/chat/completions`;
+                    } else {
+                        url = selectedProvider === 'xai' ? 'https://api.x.ai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
+                        headers['Authorization'] = `Bearer ${key}`;
+                    }
+                    
+                    body = { 
+                        model: selectedModel || (selectedProvider === 'openai' ? 'gpt-4o' : selectedProvider === 'xai' ? 'grok-beta' : 'local-model'),
+                        messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] 
+                    };
+                } else if (selectedProvider === 'claude') {
+                    url = 'https://api.anthropic.com/v1/messages';
+                    headers['x-api-key'] = key;
+                    headers['anthropic-version'] = '2023-06-01';
+                    body = { model: selectedModel || 'claude-3-5-sonnet-20241022', system: system, messages: [{ role: 'user', content: prompt }], max_tokens: 4096 };
+                }
+
+                try {
+                    const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+                    const result = await response.json();
+                    
+                    if (!response.ok) {
+                        const err = result.error?.message || result.error?.code || response.statusText;
+                        throw new Error(`API Error: ${err}`);
+                    }
+
+                    let output;
+                    if (selectedProvider === 'gemini') output = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                    else if (['openai', 'xai', 'local'].includes(selectedProvider)) output = result.choices?.[0]?.message?.content;
+                    else if (selectedProvider === 'claude') output = result.content?.[0]?.text;
+                    
+                    if (!output) throw new Error("Empty response from AI");
+                    return output;
+                } catch (e) {
+                    throw e; // Re-throw for generateAiPatch to catch
+                }
+            };
+
+const toggleContextFile = (name) => {
+                const next = new Set(contextSelection);
+                if (next.has(name)) next.delete(name);
+                else next.add(name);
+                setContextSelection(next);
+            };
+
+            const toggleAllContext = () => {
+                if (contextSelection.size === projectFiles.length) {
+                    setContextSelection(new Set());
+                } else {
+                    setContextSelection(new Set(projectFiles.map(f => f.name)));
+                }
+            };
+
+            const syncProjectContext = async () => {
+                if (contextSelection.size === 0) {
+                    setProjectContext("");
+                    return;
+                }
+                setIsSyncing(true);
+                let bundle = "";
+                try {
+                    for (const handle of projectFiles) {
+                        if (!contextSelection.has(handle.name)) continue;
+                        const file = await handle.getFile();
+                        const text = await file.text();
+                        bundle += `\n--- FILE: ${handle.name} ---\n${text}\n`;
+                    }
+                    setProjectContext(bundle);
+                    setShowSyncMenu(false);
+                } catch (e) {
+                    console.error("Context sync failed", e);
+                } finally {
+                    setIsSyncing(false);
+                }
+            };
+
+            const generateAiPatch = async () => {
+                if (!aiPrompt.trim()) return;
+                setIsAiGenerating(true); setAiError(null);
+                
+                const V3_PROMPT = `You are a Code Maintenance Agent using the Differ V3 patching engine.
+Rules:
+1. Use strict search/replace blocks:
 <<<< SEARCH
-  code
+[Exact existing code to remove]
 ==== REPLACE
-  new code (can contain <<<< SEARCH)
->>>>`}
-                                            </pre>
-                                            <p className="text-[9px] text-slate-500 mt-2">To patch Differ using itself, you <strong>MUST</strong> use the explicit <strong>&gt;&gt;&gt;&gt;</strong> closer.</p>
-                                        </div>
+[New code to insert]
+>>>>
+2. Do NOT use standard diffs (+++/---).
+3. Do NOT use line numbers.
+4. The SEARCH block must match whitespace exactly.
+5. Use '>>' (Anchor Mode) for SEARCH blocks longer than 9 lines.
+6. Output ONLY the patch blocks.`;
+
+                try {
+                    // Inject Project Context if available
+                    const contextPrefix = projectContext ? `PROJECT CONTEXT (Other files in folder):\n${projectContext}\n\n` : "";
+                    const rawText = await callAI(`${contextPrefix}CURRENT FILE (${currentFileName || 'unsaved'}):\n${source}\n\nTASK: ${aiPrompt}`, V3_PROMPT);
+                    
+                    // Sanitize Output: Remove Markdown fences AND normalize Git conflict markers to Differ V3
+                    let cleanText = rawText.replace(/```.*?\n/g, '').replace(/```/g, '').trim();
+                    
+                    cleanText = cleanText
+                        .replace(/^<{7,}\s*(?:SEARCH)?/gm, '<<<< SEARCH')  // Fix <<<<<<<
+                        .replace(/^={7,}\s*$/gm, '==== REPLACE')            // Fix =======
+                        .replace(/^>{7,}(?:\s*REPLACE)?.*$/gm, '>>>>');     // Fix >>>>>>> REPLACE
+                        
+                    setPatchesRaw(prev => (prev ? prev + "\n\n" : "") + cleanText);
+                    setAiPrompt(""); 
+                } catch (err) { setAiError(err.message); } finally { setIsAiGenerating(false); }
+            };
+
+            const isDragging = isResizingH || isResizingR || isResizingV;
+
+return (
+                <div className={`flex flex-col h-screen bg-slate-900 text-slate-300 font-sans relative ${isDragging ? 'select-none' : ''}`}>
+
+                    {/* RESIZE SHIELD (Prevents iframe from stealing mouse events) */}
+                    {isDragging && (
+                        <div className="fixed inset-0 z-[9999] bg-transparent" style={{ cursor: isResizingV ? 'ns-resize' : 'col-resize' }}></div>
+                    )}
+
+{/* SUPPORT MODAL */}
+                    {showSupportModal && (
+                        <div className="absolute inset-0 z-[120] flex items-center justify-center p-8 glass-panel animate-in fade-in duration-200">
+                            <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-sm w-full p-6 relative text-center">
+                                <button onClick={() => setShowSupportModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-white transition-all"><i className="fa-solid fa-xmark text-xl"></i></button>
+                                <div className="w-16 h-16 bg-amber-900/20 rounded-full flex items-center justify-center mx-auto mb-4 text-amber-500">
+                                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/><line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/></svg>
+                                </div>
+                                <h2 className="text-xl font-bold text-white mb-2">Buy Me a Coffee</h2>
+                                <p className="text-xs text-slate-400 mb-6">Support the development of Differ V3.</p>
+<div id="paypal-container" className="min-h-[60px] bg-slate-950 rounded border border-slate-800 p-4 flex flex-col items-center justify-center gap-2">
+                                    <div className="text-[10px] text-amber-500 font-bold">Preview Mode: SDK Disabled</div>
+                                    <div className="text-[9px] text-slate-500 text-center leading-tight">
+                                        The PayPal SDK cannot run in this sandboxed editor.<br/>
+                                        It will function correctly when you export and deploy.
                                     </div>
+                                    <button className="mt-2 bg-[#FFC439] text-slate-900 px-4 py-1.5 rounded-full text-xs font-bold font-sans opacity-50 cursor-not-allowed">
+                                        <i className="fa-brands fa-paypal mr-1"></i> Donate
+                                    </button>
                                 </div>
                             </div>
                         </div>
                     )}
 
-                    <header className="h-14 bg-slate-950 border-b border-slate-800 flex items-center justify-between px-4 shrink-0 z-50">
+{/* HELP MODAL */}
+                    {showHelp && (
+                        <div className="absolute inset-0 z-[100] flex items-center justify-center p-8 glass-panel animate-in fade-in duration-200">
+                            <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-4xl w-full p-6 relative flex flex-col max-h-[90vh]">
+                                <button onClick={() => setShowHelp(false)} className="absolute top-4 right-4 text-slate-400 hover:text-white hover:rotate-90 transition-all"><i className="fa-solid fa-xmark text-xl"></i></button>
+                                <h2 className="text-xl font-bold text-white mb-6 flex items-center gap-2"><i className="fa-solid fa-book text-blue-500"></i> Patch Format Guide</h2>
+                                
+                                <div className="overflow-y-auto pr-2 no-scrollbar flex-1 mb-4">
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        <div className="space-y-4">
+                                            {/* 1. Standard */}
+                                            <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                                <div className="text-xs font-bold text-emerald-400 mb-2 uppercase tracking-wider">1. Standard Block</div>
+                                                <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
+{`<<<< SEARCH
+  const a = 1;
+==== REPLACE
+  const a = 2;
+>>>>`}
+                                                </pre>
+                                            </div>
+                                            {/* 2. Line Numbers */}
+                                            <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                                <div className="text-xs font-bold text-blue-400 mb-2 uppercase tracking-wider">2. Line Numbers</div>
+                                                <pre className="text-[10px] font-mono text-slate-300 leading-relaxed opacity-80">
+{`<<<< SEARCH
+#100
+:
+#105
+==== REPLACE
+  newCode();
+>>>>`}
+                                                </pre>
+                                            </div>
+                                            {/* 4. Chaining */}
+                                            <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                                <div className="text-xs font-bold text-amber-400 mb-2 uppercase tracking-wider">4. Chaining</div>
+                                                <p className="text-[10px] text-slate-400 leading-relaxed">
+                                                    You can paste multiple patch blocks in sequence. The engine processes them in order. Ideal for refactoring multiple functions at once.
+                                                </p>
+                                            </div>
+                                        </div>
+                                        <div className="space-y-4">
+                                            {/* 3. Range Anchors */}
+                                            <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                                <div className="text-xs font-bold text-purple-400 mb-2 uppercase tracking-wider">3. Range Anchors</div>
+                                                <pre className="text-[10px] font-mono text-slate-400 leading-relaxed opacity-80">
+{`<<<< SEARCH
+  Start Anchor
+  >>
+  End Anchor
+==== REPLACE
+  ...
+>>>>`}
+                                                </pre>
+                                                <p className="text-[9px] text-slate-500 mt-2">Skip volatile code by matching only start/end context.</p>
+                                            </div>
+                                            {/* 5. Deep Inception */}
+                                            <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                                <div className="text-xs font-bold text-rose-400 mb-2 uppercase tracking-wider">5. Deep Inception</div>
+                                                <pre className="text-[10px] font-mono text-slate-400 leading-relaxed opacity-80">
+{`<<<<< SEARCH
+  const str = "<<<< SEARCH";
+===== REPLACE
+  const str = "New Value";
+>>>>`}
+                                                </pre>
+                                                <p className="text-[9px] text-slate-500 mt-2">Use variable fences (5+ chars) to patch files that contain patch syntax (e.g. patching Differ itself).</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <button 
+                                    onClick={() => {
+                                        setInputWidth(320);
+                                        setResultWidth(400);
+                                        setQueueHeight(300);
+                                        setShowHelp(false);
+                                    }}
+                                    className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 text-xs font-bold transition-all mt-auto"
+                                >
+                                    <i className="fa-solid fa-arrows-rotate mr-2"></i> RESET LAYOUT TO DEFAULT
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {showApiModal && (
+                        <div className="absolute inset-0 z-[110] flex items-center justify-center p-8 glass-panel animate-in fade-in duration-200">
+                            <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-md w-full p-6 relative">
+                                <button onClick={() => setShowApiModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-white transition-all"><i className="fa-solid fa-xmark text-xl"></i></button>
+                                <h2 className="text-xl font-bold text-white mb-6 flex items-center gap-2">
+                                    <svg viewBox="0 0 24 24" className="w-5 h-5 fill-amber-500"><path d="M12.65 10C11.83 7.67 9.61 6 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6c2.61 0 4.83-1.67 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>
+                                    API Provider Keys
+                                </h2>
+                                
+                                <div className="space-y-4">
+                                    {[
+                                        { id: 'gemini', label: 'Google Gemini', icon: 'fa-solid fa-sparkles', color: 'text-blue-400' },
+                                        { id: 'openai', label: 'OpenAI (GPT)', icon: 'fa-solid fa-bolt', color: 'text-emerald-400' },
+                                        { id: 'xai', label: 'xAI (Grok)', icon: 'fa-solid fa-x', color: 'text-slate-200' },
+                                        { id: 'claude', label: 'Anthropic Claude', icon: 'fa-solid fa-ghost', color: 'text-orange-400' },
+                                        { id: 'local', label: 'Local (Ollama/LM Studio)', icon: 'fa-solid fa-server', color: 'text-purple-400' }
+                                    ].map(prov => (
+                                        <div key={prov.id} className="space-y-1">
+                                            <label className="text-[10px] font-bold text-slate-500 uppercase flex items-center gap-2">
+                                                <i className={`${prov.icon} ${prov.color} w-3`}></i> {prov.label}
+                                            </label>
+                                            <input 
+                                                type="password"
+                                                value={apiKeys[prov.id]}
+                                                onChange={(e) => {
+                                                    const next = { ...apiKeys, [prov.id]: e.target.value };
+                                                    setApiKeys(next);
+                                                    safeStorage.setItem('differ_api_keys', JSON.stringify(next));
+                                                }}
+                                                placeholder={prov.id === 'local' ? 'Endpoint URL...' : 'Paste API Key...'}
+                                                className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs focus:border-blue-500 outline-none text-slate-300 font-mono"
+                                            />
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="mt-6 p-3 bg-blue-900/20 border border-blue-900/50 rounded-lg text-[10px] text-blue-300">
+                                    <i className="fa-solid fa-shield-halved mr-2"></i> Keys are stored only in your browser's local storage and used for direct API calls.
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+<header className="h-14 bg-slate-950 border-b border-slate-800 flex items-center justify-between px-4 shrink-0 z-50 relative">
+                        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 hidden md:block">
+                            <button 
+                                onClick={() => setShowSupportModal(true)} 
+                                className="text-slate-500 hover:text-amber-400 transition-colors p-2 rounded-full hover:bg-slate-900/50" 
+                                title="Buy me a coffee"
+                            >
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/><line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/></svg>
+                            </button>
+                        </div>
                         <div className="flex items-center gap-3">
-                            <div className="bg-blue-600 text-white w-8 h-8 rounded-lg flex items-center justify-center font-bold text-lg">D</div>
-                            <h1 className="font-bold text-slate-100 tracking-wide text-sm hidden md:block">Differ <span className="text-slate-500 font-normal">v3.0</span></h1>
-                            <div className="flex gap-2 ml-4">
-                                {stats.matched > 0 && <span className="text-xs px-2 py-1 rounded bg-emerald-950/50 border border-emerald-900 text-emerald-400 font-mono">MATCH: {stats.matched}</span>}
-                                {stats.failed > 0 && <span className="text-xs px-2 py-1 rounded bg-rose-950/50 border border-rose-900 text-rose-400 font-mono">ERR: {stats.failed}</span>}
+                            <div className="flex items-center">
+                                <div className="bg-blue-600 text-white w-6 h-6 rounded flex items-center justify-center font-bold text-sm leading-none shrink-0 shadow-lg shadow-blue-900/20">D</div>
+                                <h1 className="font-bold text-slate-100 tracking-tighter text-lg ml-0.5">iffer <span className="text-slate-500 font-normal text-[10px] ml-1 hidden sm:inline">v3.1</span></h1>
+                            </div>
+                            
+<div className="flex gap-1 ml-2 border-l border-slate-800 pl-4 relative">
+                                <button 
+                                    onClick={() => setShowApiModal(true)} 
+                                    className={`w-8 h-8 flex items-center justify-center rounded transition-all ${Object.values(apiKeys || {}).some(k => k && k.length > 5) ? 'text-amber-400 hover:text-amber-300' : 'text-slate-400 hover:text-white'} hover:bg-slate-800`} 
+                                    title="API Keys & Models"
+                                >
+                                    <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current"><path d="M12.65 10C11.83 7.67 9.61 6 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6c2.61 0 4.83-1.67 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>
+                                </button>
+                                <button onClick={exportSession} className="w-8 h-8 flex items-center justify-center rounded text-slate-400 hover:text-white hover:bg-slate-800 transition-all" title="Save Session"><i className="fa-solid fa-floppy-disk text-xs"></i></button>
+                                <div className="relative">
+                                    <button onClick={() => setShowLoadMenu(!showLoadMenu)} className="w-8 h-8 flex items-center justify-center rounded text-slate-400 hover:text-white hover:bg-slate-800 transition-all" title="Open..."><i className="fa-solid fa-folder-open text-xs"></i></button>
+                                    {showLoadMenu && (
+                                        <div className="absolute top-full left-0 mt-2 w-56 bg-slate-800 border border-slate-700 rounded-lg shadow-xl overflow-hidden z-[60] flex flex-col">
+                                            <button onClick={() => { setShowLoadMenu(false); fileInputRef.current.click(); }} className="px-4 py-3 text-left text-xs font-bold text-slate-300 hover:bg-slate-700 hover:text-white border-b border-slate-700 flex items-center">
+                                                <i className="fa-solid fa-code mr-3 text-blue-400 w-4"></i> Open Session (.json)
+                                            </button>
+                                            <button onClick={handleMountFolder} className="px-4 py-3 text-left text-xs font-bold text-slate-300 hover:bg-slate-700 hover:text-white border-b border-slate-700 flex items-center">
+                                                <i className="fa-solid fa-hard-drive mr-3 text-emerald-400 w-4"></i> Mount Local Folder
+                                            </button>
+                                            <button onClick={handleSandboxLoad} className="px-4 py-3 text-left text-xs font-bold text-slate-300 hover:bg-slate-700 hover:text-white flex items-center">
+                                                <i className="fa-solid fa-file-import mr-3 text-amber-400 w-4"></i> Load File (Sandbox)
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                                <input type="file" ref={fileInputRef} onChange={importSession} className="hidden" accept=".json" />
+                            </div>
+
+<div className="flex gap-1.5 ml-2">
+                                {stats.matched > 0 && <span className="h-8 flex items-center px-2 rounded bg-emerald-950/50 border border-emerald-900 text-emerald-400 font-mono text-[10px]" title="Matches">{window.innerWidth > 850 ? 'MATCH: ' : ''}{stats.matched}</span>}
+                                {stats.applied > 0 && <span className="h-8 flex items-center px-2 rounded bg-amber-950/50 border border-amber-900 text-amber-400 font-mono text-[10px]" title="Verified">{window.innerWidth > 850 ? 'DONE: ' : ''}{stats.applied}</span>}
+                                {stats.failed > 0 && <span className="h-8 flex items-center px-2 rounded bg-rose-950/50 border border-rose-900 text-rose-400 font-mono text-[10px]" title="Errors">{window.innerWidth > 850 ? 'ERR: ' : ''}{stats.failed}</span>}
                             </div>
                         </div>
                         <div className="flex gap-2">
                             <button onClick={() => setShowHelp(!showHelp)} className={`w-8 h-8 flex items-center justify-center rounded text-xs font-bold border transition-all ${showHelp ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-transparent border-slate-800 text-slate-500'}`}>?</button>
                             <div className="w-px h-6 bg-slate-800 mx-1"></div>
-                            <button onClick={() => setShowInputColumn(!showInputColumn)} className={`px-3 py-1.5 rounded text-xs font-bold border transition-all ${showInputColumn ? 'bg-slate-800 border-slate-600 text-white' : 'bg-transparent border-slate-800 text-slate-500'}`}>Inputs</button>
-                            <button onClick={() => setShowLineNumbers(!showLineNumbers)} className={`w-8 h-8 flex items-center justify-center rounded text-xs font-bold border transition-all ${showLineNumbers ? 'bg-slate-800 border-slate-600 text-white' : 'bg-transparent border-slate-800 text-slate-500'}`}>#</button>
-                            <button onClick={() => setShowMiniMap(!showMiniMap)} className={`px-3 py-1.5 rounded text-xs font-bold border transition-all ${showMiniMap ? 'bg-slate-800 border-slate-600 text-white' : 'bg-transparent border-slate-800 text-slate-500'}`}>Map</button>
+                            <button onClick={() => setShowInputColumn(!showInputColumn)} className={`w-8 h-8 flex items-center justify-center rounded text-xs font-bold border transition-all ${showInputColumn ? 'bg-slate-800 border-slate-600 text-white' : 'bg-transparent border-slate-800 text-slate-500'}`} title="Toggle Inputs"><i className="fa-solid fa-table-columns"></i></button>
+                            <button onClick={() => setShowLineNumbers(!showLineNumbers)} className={`w-8 h-8 flex items-center justify-center rounded text-xs font-bold border transition-all ${showLineNumbers ? 'bg-slate-800 border-slate-600 text-white' : 'bg-transparent border-slate-800 text-slate-500'}`} title="Toggle Line Numbers">#</button>
+                            <button onClick={() => setShowMiniMap(!showMiniMap)} className={`w-8 h-8 flex items-center justify-center rounded text-xs font-bold border transition-all ${showMiniMap ? 'bg-slate-800 border-slate-600 text-white' : 'bg-transparent border-slate-800 text-slate-500'}`} title="Toggle Minimap"><i className="fa-regular fa-map"></i></button>
+                            <div className="w-px h-6 bg-slate-800 mx-1"></div>
+                            
+                            <button onClick={() => setParserMode(parserMode === 'smart' ? 'strict' : 'smart')} className={`w-8 h-8 flex items-center justify-center rounded text-[10px] font-bold border transition-all ${parserMode==='strict' ? 'bg-amber-900/30 border-amber-700 text-amber-500' : 'bg-transparent border-slate-800 text-slate-500'}`} title={parserMode === 'strict' ? "Parser: Strict (Requires >>>>)" : "Parser: Smart (Auto-Detect)"}>P</button>
+                            <button onClick={() => setIgnoreIndentation(!ignoreIndentation)} className={`w-8 h-8 flex items-center justify-center rounded text-[10px] font-bold border transition-all ${!ignoreIndentation ? 'bg-purple-900/30 border-purple-700 text-purple-400' : 'bg-transparent border-slate-800 text-slate-500'}`} title={ignoreIndentation ? "Search: Relaxed (Ignores Indent)" : "Search: Exact (Strict Indent)"}>S</button>
+                            
                             <div className="w-px h-6 bg-slate-800 mx-2"></div>
-                            <button onClick={applyAll} disabled={stats.matched === 0} className={`px-4 py-1.5 rounded font-bold text-xs uppercase tracking-widest transition-all ${stats.matched > 0 ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-900/20' : 'bg-slate-800 text-slate-600 cursor-not-allowed'}`}>
-                                Apply All
+                            <button onClick={applyAll} disabled={stats.matched === 0} className={`h-8 px-3 rounded font-bold text-xs uppercase tracking-widest transition-all flex items-center justify-center ${stats.matched > 0 ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-900/20' : 'bg-slate-800 text-slate-600 cursor-not-allowed'}`} title="Apply All Patches">
+                                <i className="fa-solid fa-check-double md:mr-2"></i> <span className="hidden md:inline">APPLY</span>
                             </button>
                         </div>
                     </header>
 
                     <div className="flex-grow flex overflow-hidden divide-x divide-slate-800 relative">
-                        <div className={`flex flex-col bg-slate-950 transition-all duration-300 ${showInputColumn ? 'w-1/4 min-w-[280px]' : 'w-0 opacity-0 overflow-hidden'}`}>
-                            <div className="h-1/2 flex flex-col border-b border-slate-800">
+<div className={`flex flex-col bg-slate-950 relative border-r border-slate-800 ${showInputColumn ? '' : 'hidden'}`} style={{ width: inputWidth }}>
+                            <div className="flex flex-col border-b border-slate-800 relative" style={{ height: queueHeight }}>
                                 <div className="h-8 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-3">
-                                    <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">1. Patch Input</span>
-                                    <button onClick={() => setPatchesRaw('')} className="text-[10px] text-slate-500 hover:text-white">CLEAR</button>
+                                    <div className="flex gap-2">
+                                        <button onClick={() => setLeftTab('queue')} className={`text-[10px] font-bold uppercase tracking-widest ${leftTab==='queue' ? 'text-white' : 'text-slate-500 hover:text-slate-400'}`} title="Input Queue"><i className="fa-solid fa-pen-to-square md:mr-1"></i><span className="hidden md:inline">INPUT</span></button>
+                                        <button onClick={() => setLeftTab('history')} className={`text-[10px] font-bold uppercase tracking-widest ${leftTab==='history' ? 'text-blue-400' : 'text-slate-500 hover:text-slate-400'}`} title="Patch History"><i className="fa-solid fa-clock-rotate-left md:mr-1"></i><span className="hidden md:inline">LOG</span> ({patchLog.length})</button>
+                                    </div>
+                                    {leftTab === 'queue' ? (
+                                        <button onClick={() => setPatchesRaw('')} className="text-[10px] text-slate-500 hover:text-white" title="Clear Queue"><i className="fa-solid fa-trash md:mr-1"></i><span className="hidden md:inline">CLEAR</span></button>
+                                    ) : (
+                                        <div className="flex gap-3">
+                                            <button onClick={clearLog} className="text-[10px] text-slate-500 hover:text-rose-400 flex items-center gap-1" title="Clear Log"><i className="fa-solid fa-trash-can md:mr-1"></i><span className="hidden md:inline">CLEAR</span></button>
+                                            <button onClick={downloadLog} className="text-[10px] text-slate-500 hover:text-blue-400 flex items-center gap-1" title="Export Log"><i className="fa-solid fa-download md:mr-1"></i><span className="hidden md:inline">EXPORT</span></button>
+                                        </div>
+                                    )}
                                 </div>
-                                <textarea value={patchesRaw} onChange={(e) => setPatchesRaw(e.target.value)} className="flex-grow bg-transparent p-4 text-xs font-mono text-amber-100/80 resize-none focus:outline-none focus:bg-slate-900/50 transition-colors" placeholder="Paste patches here..." spellCheck="false"></textarea>
+                                <textarea value={patchesRaw} onChange={(e) => { setPatchesRaw(e.target.value); if(leftTab!=='queue') setLeftTab('queue'); }} className="flex-grow bg-transparent p-4 text-xs font-mono text-amber-100/80 resize-none focus:outline-none focus:bg-slate-900/50 transition-colors" placeholder="Paste patches here..." spellCheck="false"></textarea>
                                 <div className="bg-slate-900 text-[9px] text-slate-500 px-2 py-1 flex justify-between border-t border-slate-800">
                                     <span>Raw Blocks: {patchesRaw.split('<<<< SEARCH').length - 1}</span>
-                                    <span>Parsed: {parsedPatches.length}</span>
+<span>Parsed: {parsedPatches.length}</span>
                                 </div>
+                                {/* Vertical Resizer */}
+                                <div onMouseDown={() => setIsResizingV(true)} className="absolute bottom-[-4px] left-0 right-0 h-2 cursor-ns-resize z-50 hover:bg-blue-500/30 transition-colors"></div>
                             </div>
-                            <div className="h-1/2 overflow-y-auto bg-slate-900 p-2 space-y-1">
-                                <div className="text-[9px] font-bold text-slate-500 uppercase px-2 mb-1 flex justify-between"><span>Queue ({parsedPatches.length})</span><span>Manage</span></div>
-                                {parsedPatches.map((p, i) => (
-                                    <div key={i} className={`queue-item text-[10px] p-2 rounded border flex gap-2 items-start relative overflow-hidden ${p.status === 'success' ? 'bg-emerald-950/30 border-emerald-900 text-emerald-400' : (p.status === 'disabled' ? 'bg-slate-800 border-slate-700 text-slate-500 opacity-60' : 'bg-rose-950/30 border-rose-900 text-rose-400')}`}>
-                                        <input type="checkbox" checked={p.status !== 'disabled'} onChange={() => togglePatch(p.id)} className="mt-0.5 cursor-pointer"/>
-                                        <div className="min-w-0 flex-1">
-                                            <div className="flex justify-between"><strong className="truncate">{p.label || `Patch #${i+1}`}</strong><span>{p.status === 'success' ? `L:${p.line}` : ''}</span></div>
-                                            <div className="opacity-50 mt-1 font-mono truncate">{p.search.substring(0, 40).replace(/\n/g, ' ')}...</div>
+                            
+                            <div className="flex-grow overflow-y-auto bg-slate-900 p-2 space-y-1 no-scrollbar">
+                                {leftTab === 'queue' ? (
+                                    <React.Fragment>
+                                        <div className="text-[9px] font-bold text-slate-500 uppercase px-2 mb-1 flex justify-between"><span>Queue ({parsedPatches.length})</span><span>Manage</span></div>
+{parsedPatches.map((p, i) => (
+                                            <div key={i} className={`queue-item text-[10px] p-2 rounded border flex gap-2 items-start relative overflow-hidden ${
+                                                p.status === 'success' ? 'bg-emerald-950/30 border-emerald-900 text-emerald-400' : 
+                                                p.status === 'applied' ? 'bg-amber-950/30 border-amber-900 text-amber-400 opacity-75' :
+                                                p.status === 'disabled' ? 'bg-slate-800 border-slate-700 text-slate-500 opacity-60' : 
+                                                'bg-rose-950/30 border-rose-900 text-rose-400'
+                                            }`}>
+                                                <input type="checkbox" checked={p.status !== 'disabled'} onChange={() => togglePatch(p.id)} className="mt-0.5 cursor-pointer"/>
+                                                <div className="min-w-0 flex-1">
+                                                    <div className="flex justify-between"><strong className="truncate">{p.label || `Patch #${i+1}`}</strong><span>{p.status === 'success' || p.status === 'applied' ? `L:${p.line}` : ''}</span></div>
+                                                    <div className="opacity-50 mt-1 font-mono truncate">{(p.status === 'applied' ? 'ALREADY APPLIED' : p.search).substring(0, 40).replace(/\n/g, ' ')}...</div>
+                                                </div>
+                                                {p.status === 'success' && (<div className="queue-actions absolute inset-y-0 right-0 bg-slate-900/90 pl-2 flex items-center pr-2"><button onClick={() => applySinglePatch(p.id)} className="bg-blue-600 text-white px-2 py-1 rounded text-[9px] font-bold uppercase hover:bg-blue-500 shadow-sm">Commit</button></div>)}
+                                            </div>
+                                        ))}
+                                    </React.Fragment>
+                                ) : (
+                                    <React.Fragment>
+                                        <div className="text-[9px] font-bold text-slate-500 uppercase px-2 mb-1">Session History</div>
+                                        {patchLog.length === 0 ? <div className="text-[9px] text-slate-600 text-center mt-4">No patches applied yet</div> : 
+                                         patchLog.slice().reverse().map((l, i) => (
+                                            <div key={l.uid} className="queue-item text-[10px] p-2 rounded border border-slate-800 bg-slate-800/30 flex gap-2 items-start relative hover:border-slate-600 transition-colors">
+                                                <div className="min-w-0 flex-1">
+                                                    <div className="flex justify-between items-center mb-1">
+                                                        <strong className="text-slate-300 truncate">{l.label}</strong>
+                                                        <span className="text-slate-500 text-[8px]">{new Date(l.ts).toLocaleTimeString()}</span>
+                                                    </div>
+                                                    <div className="opacity-40 font-mono truncate text-[9px]">{l.raw.substring(0, 50).replace(/\n/g, ' ')}...</div>
+                                                </div>
+                                                <div className="queue-actions absolute inset-y-0 right-0 bg-slate-900/90 pl-2 flex items-center pr-2">
+                                                    <button onClick={() => recallPatch(l.raw)} className="text-blue-400 hover:text-white px-2 py-1 text-[9px] font-bold uppercase">Recall</button>
+                                                </div>
+</div>
+                                        ))}
+                                    </React.Fragment>
+                                )}
+                            </div>
+
+                            {/* AI CHATBOX FOOTER */}
+                            {leftTab === 'queue' && (
+                                <div className="p-3 bg-slate-900 border-t border-slate-800 space-y-2">
+                                    <div className="flex items-center justify-between mb-1">
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-[9px] font-bold text-purple-400 uppercase tracking-widest flex items-center gap-1">
+                                                <i className="fa-solid fa-wand-sparkles"></i> AI
+                                            </span>
+                                            <select 
+                                                value={selectedProvider} 
+onChange={(e) => {
+                                                    setSelectedProvider(e.target.value);
+                                                    safeStorage.setItem('differ_provider', e.target.value);
+                                                }}
+                                                className="bg-slate-900 border border-slate-700 rounded-sm px-1 text-[9px] font-bold text-slate-300 outline-none cursor-pointer hover:bg-slate-800 transition-colors"
+                                            >
+                                                <option value="gemini">Gemini</option>
+                                                <option value="openai">OpenAI</option>
+                                                <option value="claude">Claude</option>
+                                                <option value="xai">xAI</option>
+                                                <option value="local">Local</option>
+</select>
+                                            {availableModels.length > 0 && (
+                                                <select 
+                                                    value={selectedModel} 
+                                                    onChange={(e) => {
+                                                        setSelectedModel(e.target.value);
+                                                        safeStorage.setItem('differ_model', e.target.value);
+                                                    }}
+                                                    className="bg-transparent text-[9px] font-bold text-purple-400 outline-none cursor-pointer border-l border-slate-700 pl-2 ml-1"
+                                                >
+                                                    {availableModels.map(m => <option key={m} value={m}>{m.split('/').pop()}</option>)}
+                                                </select>
+                                            )}
                                         </div>
-                                        {p.status === 'success' && (<div className="queue-actions absolute inset-y-0 right-0 bg-slate-900/90 pl-2 flex items-center pr-2"><button onClick={() => applySinglePatch(p.id)} className="bg-blue-600 text-white px-2 py-1 rounded text-[9px] font-bold uppercase hover:bg-blue-500 shadow-sm">Commit</button></div>)}
+{!apiKeys[selectedProvider] && (
+                                            <button onClick={() => setShowApiModal(true)} className="text-[8px] text-amber-500 hover:underline">{selectedProvider === 'local' ? 'Set URL' : 'Set Key'}</button>
+                                        )}
                                     </div>
-                                ))}
-                            </div>
+                                    <div className="relative">
+                                        <textarea 
+                                            value={aiPrompt}
+                                            onChange={(e) => setAiPrompt(e.target.value)}
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter' && !e.shiftKey) {
+                                                    e.preventDefault();
+                                                    generateAiPatch();
+                                                }
+                                            }}
+                                            placeholder={(apiKeys[selectedProvider] || selectedProvider === 'local') ? "Describe change (Enter)..." : "Set API Key to use AI..."}
+                                            disabled={(!apiKeys[selectedProvider] && selectedProvider !== 'local') || isAiGenerating}
+                                            className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-[10px] text-slate-300 outline-none focus:border-purple-600 transition-colors resize-none h-12 no-scrollbar"
+                                        ></textarea>
+                                        {isAiGenerating && (
+                                            <div className="absolute inset-0 bg-slate-950/80 flex items-center justify-center rounded-lg">
+                                                <i className="fa-solid fa-spinner fa-spin text-purple-500"></i>
+                                            </div>
+                                        )}
+                                    </div>
+                                    {aiError && <div className="text-[8px] text-rose-500 text-center">{aiError}</div>}
+                                </div>
+                            )}
                         </div>
 
-                        <div className="flex-1 flex flex-col bg-[#0f172a] relative min-w-0 group">
-                            <div className="h-8 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-3 z-20 shrink-0">
-                                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">2. Source Code</span>
-                                <div className="flex items-center gap-3">
-                                    <div className="flex gap-2">
-                                        <button onClick={handleUndo} disabled={undoStack.length === 0} className="text-[10px] font-bold uppercase tracking-widest text-slate-400 hover:text-white disabled:opacity-30 transition-all"><i className="fa-solid fa-undo mr-1"></i> Undo</button>
-                                        <button onClick={handleRedo} disabled={redoStack.length === 0} className="text-[10px] font-bold uppercase tracking-widest text-slate-400 hover:text-white disabled:opacity-30 transition-all"><i className="fa-solid fa-redo mr-1"></i> Redo</button>
+{/* Horizontal Resizer */}
+                        {showInputColumn && (
+                            <div onMouseDown={() => setIsResizingH(true)} className="w-1 cursor-col-resize hover:bg-blue-500/50 z-50 transition-colors"></div>
+                        )}
+
+<div className="flex-1 flex flex-col bg-[#0f172a] relative min-w-[300px] group overflow-hidden">
+<div className="h-8 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-3 z-20 shrink-0 relative">
+<div className="flex items-center gap-2">
+                                    <div className="relative">
+                                        <button 
+                                            onClick={() => setShowIndexMenu(!showIndexMenu)}
+                                            className={`w-7 h-7 flex items-center justify-center rounded text-[10px] transition-colors border ${showIndexMenu ? 'bg-blue-900/30 border-blue-800 text-blue-400' : 'bg-transparent border-transparent text-slate-500 hover:text-white hover:bg-slate-800'}`}
+                                            title="Code Index & Navigation"
+                                        >
+                                            <i className="fa-solid fa-code"></i>
+                                        </button>
+                                        
+                                        {showIndexMenu && (
+                                            <div className="absolute top-full left-0 mt-2 w-64 bg-slate-800 border border-slate-700 rounded-lg shadow-xl z-[70] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-100">
+                                                <div className="p-2 border-b border-slate-700 grid grid-cols-4 gap-1 bg-slate-900/50">
+                                                    {['defs', 'regions', 'events', 'iife'].map(k => (
+                                                        <button 
+                                                            key={k} 
+                                                            onClick={() => setIndexFilters(p => ({...p, [k]: !p[k]}))}
+                                                            className={`text-[8px] py-1 rounded uppercase font-bold border ${indexFilters[k] ? 'bg-slate-700 border-slate-600 text-slate-200' : 'bg-transparent border-transparent text-slate-600 hover:bg-slate-800'}`}
+                                                            title={`Toggle ${k}`}
+                                                        >
+                                                            {k}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                                <div className="max-h-[300px] overflow-y-auto p-1 space-y-0.5 no-scrollbar">
+                                                    {codeIndex.filter(item => indexFilters[item.type]).length === 0 ? (
+                                                        <div className="p-4 text-center text-[9px] text-slate-600 italic">No items found</div>
+                                                    ) : (
+codeIndex.filter(item => indexFilters[item.type]).map((item, i) => (
+                                                            <button 
+                                                                key={i}
+                                                                onClick={() => {
+                                                                    // 1. Prepare UI
+                                                                    if (showDiff) setShowDiff(false); // Ensure editor is visible
+                                                                    setShowIndexMenu(false);
+                                                                    setActiveHighlight({ start: item.line, end: item.end });
+                                                                    
+                                                                    // 2. Execute Selection (Delayed for render cycle)
+                                                                    setTimeout(() => {
+                                                                        const textarea = sourceRef.current;
+                                                                        if(!textarea) return;
+                                                                        
+                                                                        // Calculate Indices
+                                                                        const val = textarea.value;
+                                                                        const lines = val.split('\n');
+                                                                        const startChar = item.line === 0 ? 0 : lines.slice(0, item.line).join('\n').length + 1;
+                                                                        const endChar = lines.slice(0, item.end + 1).join('\n').length;
+                                                                        
+                                                                        // Apply Focus & Selection
+                                                                        textarea.focus();
+                                                                        textarea.setSelectionRange(startChar, endChar);
+                                                                        
+                                                                        // Smart Scroll (Center the block)
+                                                                        const lineHeight = 20; 
+                                                                        const topPx = item.line * lineHeight;
+                                                                        textarea.scrollTop = topPx - (textarea.clientHeight / 3);
+                                                                    }, 50);
+                                                                }}
+                                                                className="w-full text-left flex items-center gap-2 px-2 py-1.5 hover:bg-slate-700 rounded group"
+                                                            >
+                                                                <div className={`w-4 text-center ${item.color} text-[9px]`}><i className={`fa-solid ${item.icon}`}></i></div>
+                                                                <span className="text-[10px] text-slate-400 group-hover:text-slate-200 truncate font-mono flex-1">{item.label}</span>
+                                                                <span className="text-[8px] text-slate-600 font-mono">:{item.line + 1}</span>
+                                                            </button>
+                                                        ))
+                                                    )}
+                                                </div>
+                                            </div>
+                                        )}
                                     </div>
-                                    <div className="w-px h-3 bg-slate-700"></div>
-                                    <span className="text-[10px] text-slate-600">{source.length} chars</span>
+<div className="flex items-center gap-1.5">
+                                    {projectFiles.length > 0 ? (
+                                        <>
+                                            {activeFileHandle && (
+                                                <button 
+                                                    onClick={saveFile}
+                                                    className={`w-7 h-7 flex items-center justify-center rounded transition-colors ${fileStatus === 'saved' ? 'text-emerald-400 bg-emerald-900/20' : fileStatus === 'error' ? 'text-rose-400 bg-rose-900/20' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
+                                                    title="Save to Disk"
+                                                >
+                                                    <i className={`fa-solid ${fileStatus === 'saving' ? 'fa-circle-notch fa-spin' : 'fa-save'}`}></i>
+                                                </button>
+                                            )}
+                                            
+                                            <div className="relative">
+                                                <button 
+                                                    onClick={() => setShowSyncMenu(!showSyncMenu)}
+                                                    className={`w-7 h-7 flex items-center justify-center rounded transition-colors ${projectContext ? 'text-purple-400 bg-purple-900/20' : 'text-slate-500 hover:text-white hover:bg-slate-800'}`}
+                                                    title="Configure AI Context"
+                                                >
+                                                    <i className={`fa-solid ${isSyncing ? 'fa-sync fa-spin' : 'fa-brain'}`}></i>
+                                                </button>
+                                                
+                                                {showSyncMenu && (
+                                                    <div className="absolute top-full left-0 mt-2 w-64 bg-slate-800 border border-slate-700 rounded-lg shadow-xl z-[70] flex flex-col animate-in fade-in zoom-in-95 duration-100">
+                                                        <div className="p-2 border-b border-slate-700 flex justify-between items-center bg-slate-900/50">
+                                                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Select Context</span>
+                                                            <button onClick={toggleAllContext} className="text-[9px] text-blue-400 hover:text-white uppercase font-bold">
+                                                                {contextSelection.size === projectFiles.length ? 'None' : 'All'}
+                                                            </button>
+                                                        </div>
+                                                        <div className="max-h-[250px] overflow-y-auto p-1 space-y-0.5 no-scrollbar">
+                                                            {projectFiles.map((f, i) => (
+                                                                <div key={i} onClick={() => toggleContextFile(f.name)} className="flex items-center gap-2 px-2 py-1.5 hover:bg-slate-700 rounded cursor-pointer group">
+                                                                    <div className={`w-3 h-3 rounded-sm border flex items-center justify-center ${contextSelection.has(f.name) ? 'bg-purple-600 border-purple-500' : 'border-slate-600'}`}>
+                                                                        {contextSelection.has(f.name) && <i className="fa-solid fa-check text-[8px] text-white"></i>}
+                                                                    </div>
+                                                                    <span className={`text-[10px] truncate ${contextSelection.has(f.name) ? 'text-slate-200' : 'text-slate-500'}`}>{f.name}</span>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                        <button 
+                                                            onClick={syncProjectContext}
+                                                            className="m-2 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded text-[10px] font-bold uppercase transition-colors"
+                                                        >
+                                                            Sync {contextSelection.size} Files 
+                                                            {projectContext && <span className="opacity-60 ml-1 font-normal normal-case">({Math.ceil(projectContext.length / 4)} toks)</span>}
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            {/* File Selector Dropdown */}
+                                            <div className="relative">
+                                                <button 
+                                                    onClick={() => setShowFileMenu(!showFileMenu)}
+                                                    className={`h-8 px-2 text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 rounded transition-colors ${showFileMenu ? 'text-blue-400 bg-slate-800' : 'text-slate-300 hover:text-white hover:bg-slate-800'}`}
+                                                    title="Switch File"
+                                                >
+                                                    <i className="fa-regular fa-file"></i>
+                                                    <span className="truncate max-w-[150px]">{currentFileName || 'SOURCE'}</span>
+                                                    <i className="fa-solid fa-caret-down text-[8px]"></i>
+                                                </button>
+                                                {showFileMenu && (
+                                                    <div className="absolute top-full left-0 mt-2 w-64 bg-slate-800 border border-slate-700 rounded-lg shadow-xl z-[70] flex flex-col overflow-hidden max-h-[300px] overflow-y-auto no-scrollbar">
+                                                        {projectFiles.map((handle, i) => (
+                                                            <button 
+                                                                key={i} 
+                                                                onClick={() => loadFile(handle)}
+                                                                className="px-3 py-2 text-left text-[10px] text-slate-400 hover:bg-slate-700 hover:text-white truncate border-b border-slate-700/50 last:border-0"
+                                                            >
+                                                                {handle.name}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </>
+                                    ) : (
+                                        window.innerWidth - inputWidth - resultWidth > 450 && <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500 select-none">SOURCE</span>
+                                    )}
+                                </div>
+                                </div>
+
+                                <div className="flex items-center gap-2 md:gap-3">
+                                    <div className="flex gap-1 md:gap-2">
+                                        <button onClick={() => setShowDiff(!showDiff)} className={`text-[10px] font-bold uppercase tracking-widest transition-all px-2 ${showDiff ? 'text-purple-400' : 'text-slate-500 hover:text-slate-400'}`} title={showDiff ? "Hide Diff" : "Show Diff"}><i className="fa-solid fa-right-left"></i>{window.innerWidth - inputWidth - resultWidth > 550 && <span className="ml-1">DIFF</span>}</button>
+                                        <button onClick={() => setWordWrap(!wordWrap)} className={`text-[10px] font-bold uppercase tracking-widest transition-all px-2 ${wordWrap ? 'text-blue-400' : 'text-slate-500 hover:text-slate-400'}`} title={wordWrap ? "Disable Word Wrap" : "Enable Word Wrap"}><i className="fa-solid fa-align-left"></i>{window.innerWidth - inputWidth - resultWidth > 550 && <span className="ml-1">WRAP</span>}</button>
+                                        <button onClick={handleUndo} disabled={undoStack.length === 0} className="text-[10px] font-bold uppercase tracking-widest text-slate-400 hover:text-white disabled:opacity-30 transition-all px-2" title="Undo"><i className="fa-solid fa-undo"></i>{window.innerWidth - inputWidth - resultWidth > 650 && <span className="ml-1">UNDO</span>}</button>
+                                        <button onClick={handleRedo} disabled={redoStack.length === 0} className="text-[10px] font-bold uppercase tracking-widest text-slate-400 hover:text-white disabled:opacity-30 transition-all px-2" title="Redo"><i className="fa-solid fa-redo"></i>{window.innerWidth - inputWidth - resultWidth > 650 && <span className="ml-1">REDO</span>}</button>
+                                    </div>
+<div className="w-px h-3 bg-slate-700"></div>
+                                    <div className="flex gap-3 text-[10px] text-slate-600 font-mono">
+                                        <span>{source.split('\n').length}L</span>
+                                        <span>{source.length}C</span>
+                                    </div>
+                                    <div className="w-px h-3 bg-slate-700 mx-1"></div>
+                                    <button onClick={clearSource} className="text-[10px] text-slate-600 hover:text-rose-500 transition-colors" title="Clear Source"><i className="fa-solid fa-trash"></i></button>
                                 </div>
                             </div>
                             {activeHoverMatch && (
@@ -587,27 +1672,133 @@
                                     <div className="text-xs font-mono border-t border-emerald-500/30 pt-2 mt-1 opacity-90 line-clamp-3">REPLACING WITH:<br/>{activeHoverMatch.replace.substring(0, 100)}...</div>
                                 </div>
                             )}
-                            <div className="relative flex-grow flex overflow-hidden">
-                                {showLineNumbers && (<div ref={gutterRef} className="w-12 bg-slate-900 text-slate-500 text-right pr-3 pt-4 select-none editor-font overflow-hidden border-r border-slate-800 z-10 flex-shrink-0 whitespace-pre pb-[50vh]">{lineNumbersText}</div>)}
-                                <div className="flex-1 relative overflow-hidden">
-                                    <div ref={backdropRef} className="absolute inset-0 p-4 pointer-events-none editor-font text-transparent opacity-100 z-0">{renderHighlights()}</div>
-                                    <textarea ref={sourceRef} value={source} onChange={(e) => setSource(e.target.value)} onScroll={handleScroll} className="absolute inset-0 w-full h-full bg-transparent p-4 text-slate-300 focus:outline-none resize-none z-10 editor-font" spellCheck="false"></textarea>
-                                </div>
-                                {showMiniMap && <div className="w-4 bg-slate-900/50 border-l border-slate-800 h-full relative z-20" ref={mapRef}>{renderMiniMap()}</div>}
+<div className="relative flex-grow flex overflow-hidden">
+                                {showDiff ? (
+                                    <div className="flex-1 flex overflow-hidden">
+                                        {showLineNumbers && (<div ref={gutterRef} className="w-10 bg-slate-900 text-slate-500 text-right pr-2 pt-4 select-none editor-font overflow-hidden border-r border-slate-800 z-10 flex-shrink-0">{lineNumbersElements}</div>)}
+                                        <div className="flex-1 overflow-auto p-4 editor-font whitespace-pre bg-[#0f172a]">
+                                            {window.Diff ? window.Diff.diffLines(source, preview).map((part, i) => (
+                                                <span key={i} className={part.added ? 'bg-emerald-950/20 text-emerald-400 block' : part.removed ? 'bg-rose-950/20 text-rose-400 block line-through opacity-60' : 'text-slate-500'}>
+                                                    {part.value}
+                                                </span>
+                                            )) : 'Diff library loading...'}
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <React.Fragment>
+                                        {showLineNumbers && (<div ref={gutterRef} className="w-10 bg-slate-900 text-slate-500 text-right pr-2 pt-4 select-none editor-font overflow-hidden border-r border-slate-800 z-10 flex-shrink-0 pb-[50vh]">{lineNumbersElements}</div>)}
+                                        <div className="flex-1 relative overflow-hidden">
+                                            {/* Measure Container (Hidden) */}
+                                            <div ref={measureRef} className="absolute top-0 left-0 p-4 -z-50 opacity-0 pointer-events-none editor-font whitespace-pre-wrap break-words" style={{ visibility: 'hidden' }}></div>
+                                            
+<div ref={backdropRef} className={`absolute inset-0 p-4 pointer-events-none editor-font text-transparent opacity-100 z-0 ${wordWrap ? 'hidden' : ''}`}>
+                                                {renderHighlights()}
+                                                {activeHighlight && !wordWrap && (
+                                                    <div 
+                                                        className="absolute left-0 right-0 mx-4 highlight-active pointer-events-none transition-all duration-200 border-y border-amber-500/20" 
+                                                        style={{ top: `${activeHighlight.start * 20}px`, height: `${(activeHighlight.end - activeHighlight.start + 1) * 20}px` }} 
+                                                    ></div>
+                                                )}
+                                            </div>
+<textarea 
+                                                ref={sourceRef}
+value={source} 
+                                                onChange={(e) => { setSource(e.target.value); setActiveHighlight(null); }} 
+                                                onScroll={handleScroll}
+                                                onKeyDown={(e) => {
+                                                    if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+                                                        e.stopPropagation();
+                                                    }
+                                                }}
+className={`absolute inset-0 w-full h-full bg-transparent p-4 text-slate-300 focus:outline-none resize-none z-10 editor-font ${wordWrap ? 'whitespace-pre-wrap' : 'whitespace-pre'}`}
+                                                spellCheck="false"
+                                            ></textarea>
+                                        </div>
+                                        {showMiniMap && <div className="w-4 bg-slate-900/50 border-l border-slate-800 h-full relative z-20" ref={mapRef}>{renderMiniMap()}</div>}
+                                    </React.Fragment>
+                                )}
                             </div>
                         </div>
 
-                        <div className="w-1/3 min-w-[300px] flex flex-col bg-[#0b1221] border-l border-slate-800">
-                            <div className="h-8 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-3">
-                                <span className="text-[10px] font-bold uppercase tracking-widest text-blue-500">Result</span>
-                                <div className="flex gap-2">
-                                    <button onClick={() => setRenderMode('code')} className={`px-2 py-0.5 rounded text-[9px] font-bold ${!showRender ? 'bg-blue-600 text-white' : 'text-slate-500 hover:text-white'}`}>CODE</button>
-                                    <button onClick={() => setRenderMode('render')} className={`px-2 py-0.5 rounded text-[9px] font-bold ${showRender ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:text-white'}`}>RENDER</button>
-                                    <button onClick={() => navigator.clipboard.writeText(preview)} className="text-[10px] text-blue-500 hover:text-white ml-2">COPY</button>
+{/* Right Resizer */}
+                        <div onMouseDown={() => setIsResizingR(true)} className="w-1 cursor-col-resize hover:bg-blue-500/50 z-50 transition-colors"></div>
+
+<div className="flex flex-col bg-[#0b1221]" style={{ width: resultWidth }}>
+                            <div className="h-8 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-3 overflow-hidden shrink-0">
+                                <span className="text-[10px] font-bold uppercase tracking-widest text-blue-500 flex items-center gap-2">
+                                    <i className="fa-solid fa-window-restore"></i>
+                                    {resultWidth > 200 && <span>RESULT</span>}
+                                </span>
+                                <div className="flex gap-2 items-center">
+                                    <button 
+                                        onClick={popOutResult} 
+                                        className={`text-[10px] transition-colors ${externalWindow && !externalWindow.closed ? 'text-blue-400' : 'text-slate-500 hover:text-white'}`} 
+                                        title="Detach Result Window"
+                                    >
+                                        <i className="fa-solid fa-up-right-from-square"></i>
+                                        {resultWidth > 420 && <span className="ml-1 uppercase text-[9px] font-bold">Detach</span>}
+                                    </button>
+                                    
+                                    <div className="w-px h-3 bg-slate-800 mx-1"></div>
+                                    
+                                    <button 
+                                        onClick={() => { setShowConsole(!showConsole); setConsoleLogs([]); }} 
+                                        className={`px-2 py-0.5 rounded text-[9px] font-bold ${showConsole ? 'bg-blue-600 text-white' : 'text-slate-500 hover:text-white'}`} 
+                                        title="Toggle Console"
+                                    >
+                                        <i className="fa-solid fa-terminal"></i>
+                                        {resultWidth > 280 && <span className="ml-1">LOGS</span>}
+                                    </button>
+                                    
+                                    <button 
+                                        onClick={() => setRenderMode(m => m === 'live' ? 'committed' : m === 'committed' ? 'code' : 'live')} 
+                                        className={`px-2 py-0.5 rounded text-[9px] font-bold transition-colors ${
+                                            renderMode === 'live' ? 'bg-emerald-600 text-white' : 
+                                            renderMode === 'committed' ? 'bg-blue-600 text-white' : 
+                                            'bg-purple-600 text-white'
+                                        }`} 
+                                        title="View: Live Render -> Committed Source -> Raw Code"
+                                    >
+                                        <i className={`fa-solid ${renderMode === 'code' ? 'fa-code' : renderMode === 'committed' ? 'fa-shield-halved' : 'fa-desktop'}`}></i>
+                                        {resultWidth > 320 && <span className="ml-1 uppercase">{renderMode === 'committed' ? 'SRC' : renderMode}</span>}
+                                    </button>
+
+                                    <button onClick={downloadResult} className="text-[10px] text-emerald-500 hover:text-white ml-2" title="Download .html"><i className="fa-solid fa-download"></i>{resultWidth > 380 && <span className="ml-1">SAVE</span>}</button>
+                                    <button onClick={() => navigator.clipboard.writeText(preview)} className="text-[10px] text-blue-500 hover:text-white ml-2" title="Copy to Clipboard"><i className="fa-regular fa-copy"></i>{resultWidth > 380 && <span className="ml-1">COPY</span>}</button>
                                 </div>
                             </div>
-                            <div className="flex-grow overflow-hidden relative">
-                                {showRender ? <iframe ref={iframeRef} className="preview-frame" sandbox="allow-scripts allow-same-origin allow-modals allow-downloads allow-forms allow-popups"></iframe> : <div className="h-full overflow-auto p-4 text-slate-400 editor-font whitespace-pre">{preview}</div>}
+                            
+<div className="flex-grow overflow-hidden relative flex flex-col">
+                                <div className={`flex-grow relative ${showConsole ? 'h-2/3' : 'h-full'}`}>
+                                    {externalWindow && !externalWindow.closed ? (
+                                        <div className="h-full flex flex-col items-center justify-center p-8 text-center text-slate-500 bg-[#0b1221]">
+                                            <i className="fa-solid fa-up-right-from-square text-3xl mb-3 opacity-50"></i>
+                                            <div className="text-[10px] font-bold uppercase tracking-widest mb-3">Preview Detached</div>
+                                            <button onClick={() => { externalWindow.close(); setExternalWindow(null); }} className="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded text-[10px] font-bold transition-colors uppercase tracking-wider">Re-Attach</button>
+                                        </div>
+                                    ) : showRender ? (
+                                        <iframe ref={iframeRef} className="preview-frame" sandbox="allow-scripts allow-same-origin allow-modals allow-downloads allow-forms allow-popups"></iframe>
+                                    ) : (
+                                        <div className="h-full overflow-auto p-4 text-slate-400 editor-font whitespace-pre">{preview}</div>
+                                    )}
+                                </div>
+                                {showConsole && (
+                                    <div className="h-1/3 bg-black border-t border-slate-800 overflow-y-auto p-2 editor-font no-scrollbar">
+                                        {consoleLogs.length === 0 ? (
+                                            <div className="text-slate-700 italic text-[10px]">Waiting for output...</div>
+                                        ) : (
+                                            consoleLogs.map((log, i) => (
+                                                <div key={i} className="flex gap-2 border-b border-slate-900 py-1 animate-in fade-in slide-in-from-left-2 duration-150">
+                                                    <span className="text-slate-600 text-[9px] shrink-0">{log.ts}</span>
+                                                    <span className={`text-[10px] break-all ${log.method === 'error' ? 'text-rose-400' : log.method === 'warn' ? 'text-amber-400' : 'text-slate-300'}`}>
+                                                        <span className="opacity-50 mr-1">[{log.method.toUpperCase()}]</span>
+                                                        {log.payload.join(" ")}
+                                                    </span>
+                                                </div>
+                                            ))
+                                        )}
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </div>

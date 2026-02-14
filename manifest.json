@@ -1,20 +1,23 @@
 {
-  "name": "Differ V3 Sandbox Engine",
-  "short_name": "Differ",
-  "start_url": "./",
-  "display": "standalone",
-  "background_color": "#0f172a",
-  "theme_color": "#2563eb",
-  "icons": [
-    {
-      "src": "icon-192.png",
-      "sizes": "192x192",
-      "type": "image/png"
-    },
-    {
-      "src": "icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png"
-    }
-  ]
+"name": "Differ V3 | The Committed Patcher",
+"short_name": "Differ",
+"description": "A high-performance, token saving, browser-based utility for surgical code patching and AI-assisted development.",
+"start_url": "./index.html",
+"display": "standalone",
+"background_color": "#0f172a",
+"theme_color": "#3b82f6",
+"orientation": "any",
+"icons": [
+{
+"src": "differ.png",
+"sizes": "512x512",
+"type": "image/png",
+"purpose": "any maskable"
+},
+{
+"src": "differ-192.png",
+"sizes": "192x192",
+"type": "image/png"
+}
+]
 }
