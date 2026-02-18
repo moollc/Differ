@@ -658,7 +658,7 @@ win.document.write(`<html><head><title>Differ Result Preview</title></head><body
                 }
             };
 
-            const importSession = (e) => {
+const importSession = (e) => {
                 const file = e.target.files[0];
                 if (!file) return;
                 const reader = new FileReader();
@@ -678,70 +678,91 @@ win.document.write(`<html><head><title>Differ Result Preview</title></head><body
                 e.target.value = null; // reset
             };
 
-const handleMountFolder = async () => {
+            // Ref for legacy folder picker
+            const folderInputRef = useRef(null);
+
+            const handleMountFolder = async () => {
                 setShowLoadMenu(false);
-                if (!isFileSystemAccessSupported) {
-                    alert("Your browser does not support local folder access (File System Access API). Try a desktop browser like Chrome or Edge, or use 'Load File (Sandbox)' for single files.");
-                    return;
-                }
-                try {
-                    const dirHandle = await window.showDirectoryPicker();
-                    const files = [];
-                    for await (const entry of dirHandle.values()) {
-                        if (entry.kind === 'file') files.push(entry);
-                    }
-                    // Sort alphabetically
-                    files.sort((a, b) => a.name.localeCompare(b.name));
-                    setProjectFiles(files);
-                    if (files.length > 0) {
-                        // Optional: Load first file or just show selection state
-                        setCurrentFileName(`Mounted: ${dirHandle.name}`); 
-                    }
-                } catch (e) {
-                    console.error("Mount failed", e);
-                    if (e.name === 'AbortError') {
-                        // User cancelled the picker, no alert needed.
-                    } else if (e.name === 'SecurityError') {
-                        alert("Security Error: Local folder access denied. This might be due to browser security settings or limitations in this PWA environment.");
-                    } else {
-                        alert("Could not access local folder: " + e.message);
+                
+                // Strategy 1: Native File System Access (Read/Write)
+                if (window.showDirectoryPicker) {
+                    try {
+                        const dirHandle = await window.showDirectoryPicker();
+                        const files = [];
+                        for await (const entry of dirHandle.values()) {
+                            if (entry.kind === 'file') files.push(entry);
+                        }
+                        files.sort((a, b) => a.name.localeCompare(b.name));
+                        setProjectFiles(files);
+                        if (files.length > 0) setCurrentFileName(`Mounted: ${dirHandle.name} (Native)`);
+                        return;
+                    } catch (e) {
+                        if (e.name === 'AbortError') return;
+                        console.warn("Native mount failed, trying legacy...", e);
                     }
                 }
+                
+                // Strategy 2: Legacy Input Fallback (Read-Only)
+                if (folderInputRef.current) folderInputRef.current.click();
             };
 
-const loadFile = async (fileHandle) => {
+            const handleLegacyFolderImport = (e) => {
+                const files = Array.from(e.target.files).sort((a, b) => a.name.localeCompare(b.name));
+                setProjectFiles(files); // These are File objects, not Handles
+                if (files.length > 0) setCurrentFileName(`Mounted: Folder (Read-Only)`);
+                e.target.value = null;
+            };
+
+            const loadFile = async (item) => {
                 try {
-                    const file = await fileHandle.getFile();
-                    const text = await file.text();
+                    let text;
+                    if (item.getFile) { 
+                        // Native Handle
+                        const file = await item.getFile();
+                        text = await file.text();
+                        setActiveFileHandle(item); // Enable Write
+                    } else { 
+                        // Legacy File Object
+                        text = await item.text();
+                        setActiveFileHandle(null); // Disable Write (Read-Only)
+                    }
+                    
                     setSource(text);
-                    savedContentRef.current = text; // Sync ref so we don't auto-save immediately
-                    setCurrentFileName(fileHandle.name);
-                    setActiveFileHandle(fileHandle);
+                    savedContentRef.current = text;
+                    setCurrentFileName(item.name);
                     setFileStatus(null);
                     setShowFileMenu(false);
-                    // Reset history to prevent undoing into previous file
                     setUndoStack([]); 
                     setRedoStack([]);
                 } catch (e) {
                     console.error("Load failed", e);
-                    alert("Could not read file: " + fileHandle.name);
+                    alert("Could not read file: " + item.name);
                 }
             };
 
             const saveFile = async () => {
-                if (!activeFileHandle) return;
                 setFileStatus('saving');
                 try {
-                    const writable = await activeFileHandle.createWritable();
-                    await writable.write(source);
-                    await writable.close();
-                    savedContentRef.current = source; // Update known saved state
+                    if (activeFileHandle) {
+                        // Native Write
+                        const writable = await activeFileHandle.createWritable();
+                        await writable.write(source);
+                        await writable.close();
+                    } else {
+                        // Legacy Download Fallback
+                        const blob = new Blob([source], { type: 'text/plain' });
+                        const a = document.createElement('a');
+                        a.href = URL.createObjectURL(blob);
+                        a.download = currentFileName || 'file.txt';
+                        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                    }
+                    
+                    savedContentRef.current = source;
                     setFileStatus('saved');
                     setTimeout(() => setFileStatus(null), 2000);
                 } catch (e) {
                     console.error("Save failed", e);
                     setFileStatus('error');
-                    // Likely permission error or file lock
                 }
             };
 
@@ -1334,17 +1355,16 @@ return (
                                     <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current"><path d="M12.65 10C11.83 7.67 9.61 6 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6c2.61 0 4.83-1.67 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>
                                 </button>
                                 <button onClick={exportSession} className="w-8 h-8 flex items-center justify-center rounded text-slate-400 hover:text-white hover:bg-slate-800 transition-all" title="Save Session"><i className="fa-solid fa-floppy-disk text-xs"></i></button>
-                                <div className="relative">
+<div className="relative">
                                     <button onClick={() => setShowLoadMenu(!showLoadMenu)} className="w-8 h-8 flex items-center justify-center rounded text-slate-400 hover:text-white hover:bg-slate-800 transition-all" title="Open..."><i className="fa-solid fa-folder-open text-xs"></i></button>
                                     {showLoadMenu && (
                                         <div className="absolute top-full left-0 mt-2 w-56 bg-slate-800 border border-slate-700 rounded-lg shadow-xl overflow-hidden z-[60] flex flex-col">
                                             <button onClick={() => { setShowLoadMenu(false); fileInputRef.current.click(); }} className="px-4 py-3 text-left text-xs font-bold text-slate-300 hover:bg-slate-700 hover:text-white border-b border-slate-700 flex items-center">
                                                 <i className="fa-solid fa-code mr-3 text-blue-400 w-4"></i> Open Session (.json)
                                             </button>
-<button 
+                                            <button 
                                                 onClick={handleMountFolder} 
-                                                disabled={!isFileSystemAccessSupported}
-                                                className={`px-4 py-3 text-left text-xs font-bold flex items-center ${isFileSystemAccessSupported ? 'text-slate-300 hover:bg-slate-700 hover:text-white border-b border-slate-700' : 'text-slate-600 cursor-not-allowed bg-slate-800/50 border-b border-slate-700'}`}
+                                                className="px-4 py-3 text-left text-xs font-bold flex items-center text-slate-300 hover:bg-slate-700 hover:text-white border-b border-slate-700"
                                             >
                                                 <i className="fa-solid fa-hard-drive mr-3 text-emerald-400 w-4"></i> Mount Local Folder
                                             </button>
@@ -1355,6 +1375,7 @@ return (
                                     )}
                                 </div>
                                 <input type="file" ref={fileInputRef} onChange={importSession} className="hidden" accept=".json" />
+                                <input type="file" ref={folderInputRef} onChange={handleLegacyFolderImport} className="hidden" webkitdirectory="" directory="" multiple="" />
                             </div>
 
 <div className="flex gap-1.5 ml-2">
