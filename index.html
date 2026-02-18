@@ -159,7 +159,22 @@ const [ignoreIndentation, setIgnoreIndentation] = useState(true);
 const [parserMode, setParserMode] = useState('smart'); // 'smart' | 'strict'
 const [activeHoverMatch, setActiveHoverMatch] = useState(null);
 const [activeHighlight, setActiveHighlight] = useState(null); // { start, end } for focused block
-            const [leftTab, setLeftTab] = useState('queue'); // 'queue' | 'history'
+const [leftTab, setLeftTab] = useState('queue'); // 'queue' | 'history'
+const [mainTab, setMainTab] = useState('editor'); // 'editor' | 'blueprint' | 'analytics'
+const [blueprint, setBlueprint] = useState(safeStorage.getItem('differ_blueprint') || '# Project Blueprint\n\n1. Objective:\n2. Implementation Plan:\n');
+const [analytics, setAnalytics] = useState(() => {
+    try {
+        const saved = JSON.parse(safeStorage.getItem('differ_analytics'));
+        // Migrate old schema (providerUsage -> tokens) or default
+        return {
+            totalCalls: saved?.totalCalls || 0,
+            totalTokens: saved?.totalTokens || 0,
+            tokens: saved?.tokens || saved?.providerUsage || {} 
+        };
+    } catch (e) {
+        return { totalCalls: 0, totalTokens: 0, tokens: {} };
+    }
+});
 const [showDiff, setShowDiff] = useState(false);
             const [wordWrap, setWordWrap] = useState(false);
             const fileInputRef = useRef(null);
@@ -224,7 +239,8 @@ const [projectContext, setProjectContext] = useState("");
             const [lineHeights, setLineHeights] = useState({});
 
 // Persist
-            useEffect(() => { safeStorage.setItem('differ_source', source); }, [source]);
+useEffect(() => { safeStorage.setItem('differ_source', source); }, [source]);
+            useEffect(() => { safeStorage.setItem('differ_blueprint', blueprint); }, [blueprint]);
 useEffect(() => { safeStorage.setItem('differ_w_input', inputWidth); }, [inputWidth]);
             useEffect(() => { safeStorage.setItem('differ_w_result', resultWidth); }, [resultWidth]);
 useEffect(() => { safeStorage.setItem('differ_h_queue', queueHeight); }, [queueHeight]);
@@ -297,9 +313,13 @@ useEffect(() => { safeStorage.setItem('differ_patches', patchesRaw); }, [patches
                 return () => clearInterval(timer);
             }, [externalWindow]);
 
-            // --- HISTORY ENGINE ---
+// --- HISTORY ENGINE ---
             const pushHistory = (newSource) => {
-                setUndoStack(prev => [...prev, source]);
+                setUndoStack(prev => {
+                    const next = [...prev, source];
+                    if (next.length > 50) return next.slice(next.length - 50); // Keep last 50
+                    return next;
+                });
                 setRedoStack([]); 
                 setSource(newSource);
             };
@@ -681,34 +701,30 @@ const importSession = (e) => {
             // Ref for legacy folder picker
             const folderInputRef = useRef(null);
 
-            const handleMountFolder = async () => {
+const handleMountFolder = async () => {
                 setShowLoadMenu(false);
-                
-                // Strategy 1: Native File System Access (Read/Write)
                 if (window.showDirectoryPicker) {
                     try {
                         const dirHandle = await window.showDirectoryPicker();
                         const files = [];
-                        for await (const entry of dirHandle.values()) {
-                            if (entry.kind === 'file') files.push(entry);
-                        }
+                        for await (const entry of dirHandle.values()) { if (entry.kind === 'file') files.push(entry); }
                         files.sort((a, b) => a.name.localeCompare(b.name));
                         setProjectFiles(files);
                         if (files.length > 0) setCurrentFileName(`Mounted: ${dirHandle.name} (Native)`);
                         return;
                     } catch (e) {
                         if (e.name === 'AbortError') return;
-                        console.warn("Native mount failed, trying legacy...", e);
+                        if (e.name === 'SecurityError' || e.name === 'NotAllowedError') {
+                            if (!window.confirm("Native access blocked. If using Brave, disable Shields for Live Editing. Use Read-Only mode (Upload)?")) return;
+                        }
                     }
                 }
-                
-                // Strategy 2: Legacy Input Fallback (Read-Only)
                 if (folderInputRef.current) folderInputRef.current.click();
             };
 
             const handleLegacyFolderImport = (e) => {
                 const files = Array.from(e.target.files).sort((a, b) => a.name.localeCompare(b.name));
-                setProjectFiles(files); // These are File objects, not Handles
+                setProjectFiles(files);
                 if (files.length > 0) setCurrentFileName(`Mounted: Folder (Read-Only)`);
                 e.target.value = null;
             };
@@ -716,66 +732,54 @@ const importSession = (e) => {
             const loadFile = async (item) => {
                 try {
                     let text;
-                    if (item.getFile) { 
-                        // Native Handle
+                    if (item.getFile) {
+                        if (item.requestPermission) await item.requestPermission({ mode: 'readwrite' });
                         const file = await item.getFile();
                         text = await file.text();
-                        setActiveFileHandle(item); // Enable Write
-                    } else { 
-                        // Legacy File Object
+                        setActiveFileHandle(item);
+                    } else {
                         text = await item.text();
-                        setActiveFileHandle(null); // Disable Write (Read-Only)
+                        setActiveFileHandle(null);
                     }
-                    
                     setSource(text);
                     savedContentRef.current = text;
                     setCurrentFileName(item.name);
-                    setFileStatus(null);
-                    setShowFileMenu(false);
-                    setUndoStack([]); 
-                    setRedoStack([]);
-                } catch (e) {
-                    console.error("Load failed", e);
-                    alert("Could not read file: " + item.name);
-                }
+                    setFileStatus(null); setShowFileMenu(false);
+                    setUndoStack([]); setRedoStack([]);
+                } catch (e) { console.error("Load failed", e); }
             };
 
             const saveFile = async () => {
+                if (!activeFileHandle && !currentFileName) return;
                 setFileStatus('saving');
                 try {
                     if (activeFileHandle) {
-                        // Native Write
                         const writable = await activeFileHandle.createWritable();
                         await writable.write(source);
                         await writable.close();
                     } else {
-                        // Legacy Download Fallback
                         const blob = new Blob([source], { type: 'text/plain' });
                         const a = document.createElement('a');
                         a.href = URL.createObjectURL(blob);
-                        a.download = currentFileName || 'file.txt';
-                        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                        a.download = currentFileName || 'patch.txt';
+                        a.click();
                     }
-                    
                     savedContentRef.current = source;
                     setFileStatus('saved');
                     setTimeout(() => setFileStatus(null), 2000);
-                } catch (e) {
-                    console.error("Save failed", e);
-                    setFileStatus('error');
-                }
+                } catch (e) { setFileStatus('error'); }
             };
 
             const handleSandboxLoad = () => {
                 setShowLoadMenu(false);
                 const input = document.createElement('input');
-                input.type = 'file';
+                input.type = 'file'; input.multiple = true;
                 input.onchange = e => {
-                    const file = e.target.files[0];
-                    if (!file) return;
-                    const reader = new FileReader();
-                    reader.onload = ev => setSource(ev.target.result);
-                    reader.readAsText(file);
+                    const files = Array.from(e.target.files).sort((a, b) => a.name.localeCompare(b.name));
+                    if (files.length === 0) return;
+                    setProjectFiles(files);
+                    if (files.length === 1) loadFile(files[0]);
+                    else { setCurrentFileName(`Imported (${files.length} files)`); setShowFileMenu(true); }
                 };
                 input.click();
             };
@@ -826,13 +830,33 @@ const importSession = (e) => {
                 });
             };
 
-            // V2.9: Virtualized Line Numbers (Adaptive)
+// V2.9: Virtualized Line Numbers (Adaptive)
             const lineNumbersElements = useMemo(() => {
                 const count = source.split('\n').length;
                 return Array.from({ length: count }).map((_, i) => (
                     <div key={i} style={{ height: wordWrap ? (lineHeights[i] || 20) : 20 }} className="leading-5">{i + 1}</div>
                 ));
             }, [source, wordWrap, lineHeights]);
+
+            // PERFORMANCE: Memoize Diff Calculation (Prevent re-calc on UI interaction)
+            const diffElements = useMemo(() => {
+                if (!window.Diff || !source || !preview) return <div className="p-8 text-center text-slate-600 animate-pulse uppercase tracking-widest">Calculating Diff...</div>;
+                
+                return window.Diff.diffLines(source, preview).map((part, i) => {
+                    const lines = part.value.split('\n');
+                    if (lines[lines.length - 1] === '') lines.pop();
+                    return lines.map((line, li) => (
+                        <div key={`${i}-${li}`} className={`flex border-b border-white/5 ${part.added ? 'bg-emerald-900/20' : part.removed ? 'bg-rose-900/20' : ''}`}>
+                            <div className={`w-8 shrink-0 text-center text-[9px] py-1 border-r border-white/5 ${part.added ? 'text-emerald-500 bg-emerald-500/10' : part.removed ? 'text-rose-500 bg-rose-500/10' : 'text-slate-600'}`}>
+                                {part.added ? '+' : part.removed ? '-' : ' '}
+                            </div>
+                            <div className={`px-4 py-1 flex-1 whitespace-pre ${part.added ? 'text-emerald-300' : part.removed ? 'text-rose-400 line-through' : 'text-slate-500'}`}>
+                                {line || '\u200B'}
+                            </div>
+                        </div>
+                    ));
+                });
+            }, [source, preview]);
 
 // V3.3 Enhanced Detection
             const isHTML = /^\s*<(!DOCTYPE|html|div|main|section|header|footer|svg)/i.test(preview.trim());
@@ -1037,21 +1061,17 @@ useEffect(() => { fetchModels(); }, [selectedProvider, apiKeys]);
 const callAI = async (prompt, system) => {
                 let key = apiKeys[selectedProvider];
                 
-                // Allow empty key for local (fallback to default)
-                if (!key && selectedProvider === 'local') {
-                    key = 'http://localhost:11434';
-                }
+                if (!key && selectedProvider === 'local') key = 'http://localhost:11434';
                 if (!key) throw new Error(`No API key found for ${selectedProvider}`);
 
                 let url, body, headers = { 'Content-Type': 'application/json' };
 
                 if (selectedProvider === 'gemini') {
-                    const model = selectedModel || 'gemini-2.0-flash'; // Safer default
+                    const model = selectedModel || 'gemini-2.0-flash';
                     url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
                     body = { contents: [{ parts: [{ text: prompt }] }], systemInstruction: { parts: [{ text: system }] } };
                 } else if (['openai', 'xai', 'local'].includes(selectedProvider)) {
                     if (selectedProvider === 'local') {
-                        // Ensure protocol and strip trailing slash
                         if (!/^https?:\/\//i.test(key)) key = 'http://' + key;
                         key = key.replace(/\/+$/, '');
                         url = key.endsWith('/v1') ? `${key}/chat/completions` : `${key}/v1/chat/completions`;
@@ -1059,108 +1079,77 @@ const callAI = async (prompt, system) => {
                         url = selectedProvider === 'xai' ? 'https://api.x.ai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
                         headers['Authorization'] = `Bearer ${key}`;
                     }
-                    
                     body = { 
                         model: selectedModel || (selectedProvider === 'openai' ? 'gpt-4o' : selectedProvider === 'xai' ? 'grok-beta' : 'local-model'),
                         messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] 
                     };
+                    if (selectedProvider === 'local') {
+                        body.options = { num_ctx: 32768, temperature: 0.1 };
+                    }
                 } else if (selectedProvider === 'claude') {
                     url = 'https://api.anthropic.com/v1/messages';
-                    headers['x-api-key'] = key;
-                    headers['anthropic-version'] = '2023-06-01';
+                    headers['x-api-key'] = key; headers['anthropic-version'] = '2023-06-01';
                     body = { model: selectedModel || 'claude-3-5-sonnet-20241022', system: system, messages: [{ role: 'user', content: prompt }], max_tokens: 4096 };
                 }
 
                 try {
                     const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-                    const result = await response.json();
+const result = await response.json();
                     
-                    if (!response.ok) {
-                        const err = result.error?.message || result.error?.code || response.statusText;
-                        throw new Error(`API Error: ${err}`);
+                    if (response.ok) {
+                        // Track Token Analytics
+                        const estimatedTokens = Math.ceil((prompt.length + system.length) / 4);
+                        setAnalytics(prev => {
+                            const next = {
+                                ...prev,
+                                totalCalls: (prev.totalCalls || 0) + 1,
+                                tokens: { ...prev.tokens, [selectedProvider]: (prev.tokens?.[selectedProvider] || 0) + estimatedTokens }
+                            };
+                            safeStorage.setItem('differ_analytics', JSON.stringify(next));
+                            return next;
+                        });
                     }
-
+                    if (!response.ok) throw new Error(`API Error: ${result.error?.message || response.statusText}`);
                     let output;
                     if (selectedProvider === 'gemini') output = result.candidates?.[0]?.content?.parts?.[0]?.text;
                     else if (['openai', 'xai', 'local'].includes(selectedProvider)) output = result.choices?.[0]?.message?.content;
                     else if (selectedProvider === 'claude') output = result.content?.[0]?.text;
-                    
-                    if (!output) throw new Error("Empty response from AI");
                     return output;
-                } catch (e) {
-                    throw e; // Re-throw for generateAiPatch to catch
-                }
+                } catch (e) { throw e; }
             };
 
-const toggleContextFile = (name) => {
+            const toggleContextFile = (name) => {
                 const next = new Set(contextSelection);
-                if (next.has(name)) next.delete(name);
-                else next.add(name);
+                if (next.has(name)) next.delete(name); else next.add(name);
                 setContextSelection(next);
-            };
-
-            const toggleAllContext = () => {
-                if (contextSelection.size === projectFiles.length) {
-                    setContextSelection(new Set());
-                } else {
-                    setContextSelection(new Set(projectFiles.map(f => f.name)));
-                }
-            };
-
-            const syncProjectContext = async () => {
-                if (contextSelection.size === 0) {
-                    setProjectContext("");
-                    return;
-                }
-                setIsSyncing(true);
-                let bundle = "";
-                try {
-                    for (const handle of projectFiles) {
-                        if (!contextSelection.has(handle.name)) continue;
-                        const file = await handle.getFile();
-                        const text = await file.text();
-                        bundle += `\n--- FILE: ${handle.name} ---\n${text}\n`;
-                    }
-                    setProjectContext(bundle);
-                    setShowSyncMenu(false);
-                } catch (e) {
-                    console.error("Context sync failed", e);
-                } finally {
-                    setIsSyncing(false);
-                }
             };
 
             const generateAiPatch = async () => {
                 if (!aiPrompt.trim()) return;
                 setIsAiGenerating(true); setAiError(null);
-                
-                const V3_PROMPT = `You are a Code Maintenance Agent using the Differ V3 patching engine.
-Rules:
-1. Use strict search/replace blocks:
-<<<< SEARCH
-[Exact existing code to remove]
-==== REPLACE
-[New code to insert]
->>>>
-2. Do NOT use standard diffs (+++/---).
-3. Do NOT use line numbers.
-4. The SEARCH block must match whitespace exactly.
-5. Use '>>' (Anchor Mode) for SEARCH blocks longer than 9 lines.
-6. Output ONLY the patch blocks.`;
+                const V3_PROMPT = `You are a Code Maintenance Agent using the Differ V3 patching engine. Follow the "Zero-Drift" Protocol:
 
+1. ANCHOR MODE (MANDATORY): For SEARCH blocks > 9 lines, use '>>' to skip the middle.
+   <<<< SEARCH
+   [Unique Start Context]
+   >>
+   [Unique End Context]
+   ==== REPLACE
+   ...
+   >>>>
+
+2. CONTEXT HYGIENE: Use exactly 2 lines of unique context. Do not guess indentation.
+3. INCEPTION SAFETY: If patching code that contains patch markers (like this prompt), use 5-char fences (<<<<< SEARCH).
+4. VARIABLE AUDIT: Do not re-declare existing variables. Check the source first.
+5. FORMATTING: No line numbers. No Git markers (<<<<<<<). Output ONLY the patch blocks.`;
                 try {
-                    // Inject Project Context if available
-                    const contextPrefix = projectContext ? `PROJECT CONTEXT (Other files in folder):\n${projectContext}\n\n` : "";
+                    const contextPrefix = projectContext ? `PROJECT CONTEXT:\n${projectContext}\n\n` : "";
                     const rawText = await callAI(`${contextPrefix}CURRENT FILE (${currentFileName || 'unsaved'}):\n${source}\n\nTASK: ${aiPrompt}`, V3_PROMPT);
-                    
-                    // Sanitize Output: Remove Markdown fences AND normalize Git conflict markers to Differ V3
                     let cleanText = rawText.replace(/```.*?\n/g, '').replace(/```/g, '').trim();
-                    
                     cleanText = cleanText
-                        .replace(/^<{7,}\s*(?:SEARCH)?/gm, '<<<< SEARCH')  // Fix <<<<<<<
-                        .replace(/^={7,}\s*$/gm, '==== REPLACE')            // Fix =======
-                        .replace(/^>{7,}(?:\s*REPLACE)?.*$/gm, '>>>>');     // Fix >>>>>>> REPLACE
-                        
+                        .replace(/^<{7,}\s*(?:SEARCH)?/gm, '<<<< SEARCH')
+                        .replace(/^={7,}\s*$/gm, '==== REPLACE')
+                        .replace(/^>{7,}(?:\s*REPLACE)?.*$/gm, '>>>>>');
                     setPatchesRaw(prev => (prev ? prev + "\n\n" : "") + cleanText);
                     setAiPrompt(""); 
                 } catch (err) { setAiError(err.message); } finally { setIsAiGenerating(false); }
@@ -1688,10 +1677,17 @@ codeIndex.filter(item => indexFilters[item.type]).map((item, i) => (
                                                 )}
                                             </div>
                                         </>
-                                    ) : (
+) : (
                                         window.innerWidth - inputWidth - resultWidth > 450 && <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500 select-none">SOURCE</span>
                                     )}
                                 </div>
+                                </div>
+
+                                {/* CENTER TABS */}
+                                <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex bg-slate-950 p-0.5 rounded-lg border border-slate-800">
+                                    <button onClick={() => setMainTab('editor')} className={`px-3 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider transition-colors ${mainTab === 'editor' ? 'bg-slate-800 text-blue-400 shadow-sm' : 'text-slate-500 hover:text-slate-300'}`}>Code</button>
+                                    <button onClick={() => setMainTab('blueprint')} className={`px-3 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider transition-colors ${mainTab === 'blueprint' ? 'bg-slate-800 text-purple-400 shadow-sm' : 'text-slate-500 hover:text-slate-300'}`}>Plan</button>
+                                    <button onClick={() => setMainTab('analytics')} className={`px-3 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider transition-colors ${mainTab === 'analytics' ? 'bg-slate-800 text-emerald-400 shadow-sm' : 'text-slate-500 hover:text-slate-300'}`}><i className="fa-solid fa-chart-pie"></i></button>
                                 </div>
 
                                 <div className="flex items-center gap-2 md:gap-3">
@@ -1717,49 +1713,94 @@ codeIndex.filter(item => indexFilters[item.type]).map((item, i) => (
                                 </div>
                             )}
 <div className="relative flex-grow flex overflow-hidden">
-                                {showDiff ? (
-                                    <div className="flex-1 flex overflow-hidden">
-                                        {showLineNumbers && (<div ref={gutterRef} className="w-10 bg-slate-900 text-slate-500 text-right pr-2 pt-4 select-none editor-font overflow-hidden border-r border-slate-800 z-10 flex-shrink-0">{lineNumbersElements}</div>)}
-                                        <div className="flex-1 overflow-auto p-4 editor-font whitespace-pre bg-[#0f172a]">
-                                            {window.Diff ? window.Diff.diffLines(source, preview).map((part, i) => (
-                                                <span key={i} className={part.added ? 'bg-emerald-950/20 text-emerald-400 block' : part.removed ? 'bg-rose-950/20 text-rose-400 block line-through opacity-60' : 'text-slate-500'}>
-                                                    {part.value}
-                                                </span>
-                                            )) : 'Diff library loading...'}
+                                {/* TAB 1: BLUEPRINT */}
+                                {mainTab === 'blueprint' && (
+                                    <div className="flex-1 flex flex-col bg-[#0f172a] p-4 animate-in fade-in zoom-in-95 duration-200">
+                                        <div className="text-[10px] font-bold text-purple-400 uppercase tracking-widest mb-2 flex justify-between">
+                                            <span>Architectural Blueprint</span>
+                                            <span className="text-slate-600">Markdown Supported</span>
+                                        </div>
+                                        <textarea 
+                                            value={blueprint} 
+                                            onChange={(e) => setBlueprint(e.target.value)} 
+                                            className="flex-1 bg-slate-900/50 border border-slate-800 rounded-lg p-4 text-slate-300 font-mono text-xs focus:outline-none focus:border-purple-500/50 resize-none leading-relaxed"
+                                            placeholder="# Plan your changes here..."
+                                        ></textarea>
+                                    </div>
+                                )}
+
+                                {/* TAB 2: ANALYTICS */}
+                                {mainTab === 'analytics' && (
+                                    <div className="flex-1 bg-[#0f172a] p-8 overflow-y-auto animate-in fade-in zoom-in-95 duration-200">
+                                        <h2 className="text-xl font-bold text-white mb-6">Token Analytics</h2>
+                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+                                            <div className="bg-slate-900 p-4 rounded-xl border border-slate-800">
+                                                <div className="text-[10px] text-slate-500 uppercase font-bold mb-1">Total Calls</div>
+                                                <div className="text-2xl font-bold text-blue-400">{analytics.totalCalls || 0}</div>
+                                            </div>
+                                            <div className="bg-slate-900 p-4 rounded-xl border border-slate-800">
+                                                <div className="text-[10px] text-slate-500 uppercase font-bold mb-1">Total Tokens Est.</div>
+                                                <div className="text-2xl font-bold text-emerald-400">{(analytics.totalTokens || 0).toLocaleString()}</div>
+                                            </div>
+                                        </div>
+<div className="space-y-2">
+                                            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-4">Usage by Provider</h3>
+                                            {Object.entries(analytics?.tokens || {}).map(([prov, tokens]) => (
+                                                <div key={prov} className="flex items-center gap-4 bg-slate-900/50 p-3 rounded-lg border border-slate-800/50">
+                                                    <div className="w-24 font-bold text-slate-300 uppercase text-xs">{prov}</div>
+                                                    <div className="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden">
+                                                        <div className="h-full bg-blue-600 rounded-full" style={{ width: `${Math.min(100, (tokens / (analytics.totalTokens || 1)) * 100)}%` }}></div>
+                                                    </div>
+                                                    <div className="w-24 text-right font-mono text-xs text-slate-500">{tokens.toLocaleString()} toks</div>
+                                                </div>
+                                            ))}
                                         </div>
                                     </div>
-                                ) : (
-                                    <React.Fragment>
-                                        {showLineNumbers && (<div ref={gutterRef} className="w-10 bg-slate-900 text-slate-500 text-right pr-2 pt-4 select-none editor-font overflow-hidden border-r border-slate-800 z-10 flex-shrink-0 pb-[50vh]">{lineNumbersElements}</div>)}
-                                        <div className="flex-1 relative overflow-hidden">
-                                            {/* Measure Container (Hidden) */}
-                                            <div ref={measureRef} className="absolute top-0 left-0 p-4 -z-50 opacity-0 pointer-events-none editor-font whitespace-pre-wrap break-words" style={{ visibility: 'hidden' }}></div>
-                                            
-<div ref={backdropRef} className={`absolute inset-0 p-4 pointer-events-none editor-font text-transparent opacity-100 z-0 ${wordWrap ? 'hidden' : ''}`}>
-                                                {renderHighlights()}
-                                                {activeHighlight && !wordWrap && (
-                                                    <div 
-                                                        className="absolute left-0 right-0 mx-4 highlight-active pointer-events-none transition-all duration-200 border-y border-amber-500/20" 
-                                                        style={{ top: `${activeHighlight.start * 20}px`, height: `${(activeHighlight.end - activeHighlight.start + 1) * 20}px` }} 
-                                                    ></div>
-                                                )}
-                                            </div>
-<textarea 
-                                                ref={sourceRef}
-value={source} 
-                                                onChange={(e) => { setSource(e.target.value); setActiveHighlight(null); }} 
-                                                onScroll={handleScroll}
-                                                onKeyDown={(e) => {
-                                                    if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
-                                                        e.stopPropagation();
-                                                    }
-                                                }}
-className={`absolute inset-0 w-full h-full bg-transparent p-4 text-slate-300 focus:outline-none resize-none z-10 editor-font ${wordWrap ? 'whitespace-pre-wrap' : 'whitespace-pre'}`}
-                                                spellCheck="false"
-                                            ></textarea>
+                                )}
+
+                                {/* TAB 3: CODE EDITOR (Default) */}
+                                {mainTab === 'editor' && (
+                                    <div className="flex-1 flex overflow-hidden">
+                                        {showDiff ? (
+                                            <div className="flex-1 flex overflow-hidden">
+                                                {showLineNumbers && (<div ref={gutterRef} className="w-10 bg-slate-900 text-slate-500 text-right pr-2 pt-4 select-none editor-font overflow-hidden border-r border-slate-800 z-10 flex-shrink-0">{lineNumbersElements}</div>)}
+<div className="flex-1 overflow-auto editor-font bg-[#0f172a] no-scrollbar">
+                                            {diffElements}
                                         </div>
-                                        {showMiniMap && <div className="w-4 bg-slate-900/50 border-l border-slate-800 h-full relative z-20" ref={mapRef}>{renderMiniMap()}</div>}
-                                    </React.Fragment>
+                                            </div>
+                                        ) : (
+                                            <React.Fragment>
+                                                {showLineNumbers && (<div ref={gutterRef} className="w-10 bg-slate-900 text-slate-500 text-right pr-2 pt-4 select-none editor-font overflow-hidden border-r border-slate-800 z-10 flex-shrink-0 pb-[50vh]">{lineNumbersElements}</div>)}
+                                                <div className="flex-1 relative overflow-hidden">
+                                                    <div ref={measureRef} className="absolute top-0 left-0 p-4 -z-50 opacity-0 pointer-events-none editor-font whitespace-pre-wrap break-words" style={{ visibility: 'hidden' }}></div>
+                                                    
+                                                    <div ref={backdropRef} className={`absolute inset-0 p-4 pointer-events-none editor-font text-transparent opacity-100 z-0 ${wordWrap ? 'hidden' : ''}`}>
+                                                        {renderHighlights()}
+                                                        {activeHighlight && !wordWrap && (
+                                                            <div 
+                                                                className="absolute left-0 right-0 mx-4 highlight-active pointer-events-none transition-all duration-200 border-y border-amber-500/20" 
+                                                                style={{ top: `${activeHighlight.start * 20}px`, height: `${(activeHighlight.end - activeHighlight.start + 1) * 20}px` }} 
+                                                            ></div>
+                                                        )}
+                                                    </div>
+                                                    <textarea 
+                                                        ref={sourceRef}
+                                                        value={source} 
+                                                        onChange={(e) => { setSource(e.target.value); setActiveHighlight(null); }} 
+                                                        onScroll={handleScroll}
+                                                        onKeyDown={(e) => {
+                                                            if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+                                                                e.stopPropagation();
+                                                            }
+                                                        }}
+                                                        className={`absolute inset-0 w-full h-full bg-transparent p-4 text-slate-300 focus:outline-none resize-none z-10 editor-font ${wordWrap ? 'whitespace-pre-wrap' : 'whitespace-pre'}`}
+                                                        spellCheck="false"
+                                                    ></textarea>
+                                                </div>
+                                                {showMiniMap && <div className="w-4 bg-slate-900/50 border-l border-slate-800 h-full relative z-20" ref={mapRef}>{renderMiniMap()}</div>}
+</React.Fragment>
+                                )}
+                                    </div>
                                 )}
                             </div>
                         </div>
