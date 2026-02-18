@@ -109,6 +109,35 @@ Click the Install icon in the address bar.
 
 Note: For single-file usage on desktop without a server, simply use Chrome's "More Tools > Create Shortcut... > Open as Window" feature.
 
+
+Editor's note:
+Specififcally for Gemini I had to generate a patch canvas so it automatically knows how to output the patches because the code says so:
+--------------------------
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Differ Ledger</title><script src="https://cdn.tailwindcss.com"></script></head>
+<body class="bg-[#0b1221] text-slate-500 p-4 font-mono text-[10px] uppercase leading-tight">
+  <div class="max-w-xl mx-auto border border-slate-800 rounded bg-slate-900 shadow-2xl overflow-hidden">
+    <div class="bg-slate-800 px-3 py-1.5 border-b border-slate-700 flex justify-between font-bold text-slate-300 tracking-tighter">
+      <span>DIFFER V3.24 LEDGER</span> <span class="text-emerald-500 flex items-center gap-1"><i class="fa-solid fa-circle text-[6px]"></i> SYNC'D</span>
+    </div>
+    <div class="p-3 space-y-3">
+      <div class="border-b border-slate-800 pb-1 text-blue-400 font-bold tracking-widest">Optimization Rules</div>
+      <ul class="space-y-1 lowercase first-letter:uppercase">
+        <li><b>Anchors:</b> Use <code class="text-slate-300 font-bold">>></code> for &gt;5 line blocks. Match unique start/end.</li>
+        <li><b>Context:</b> Min 2 lines unique context. Prevent search collisions.</li>
+        <li><b>Safety:</b> Verify <code class="text-slate-300 font-bold">const/let</code> to avoid re-declaration syntax errors.</li>
+        <li><b>Fences:</b> Use <code class="text-slate-300 font-bold">&lt;&lt;&lt;&lt;&lt;</code> (5+ chars) for meta-patching Differ.</li>
+      </ul>
+      <div class="border-b border-slate-800 pb-1 text-emerald-500 font-bold tracking-widest">Active Queue</div>
+      <div id="patchContainer" class="py-1 opacity-40 italic lowercase">No pending patches. All features verified in source.</div>
+    </div>
+  </div>
+</body>
+</html>
+----------------------------
+Hopefully that allows consitent patch outputs...
+
 License
 
 MIT
