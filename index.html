@@ -182,10 +182,11 @@ const [showSupportModal, setShowSupportModal] = useState(false);
 const [showIndexMenu, setShowIndexMenu] = useState(false);
             const [consoleLogs, setConsoleLogs] = useState([]);
             const [showConsole, setShowConsole] = useState(false);
-            const [externalWindow, setExternalWindow] = useState(null);
+const [externalWindow, setExternalWindow] = useState(null);
             
 // Project Mode
             const [projectFiles, setProjectFiles] = useState([]);
+            const [isFileSystemAccessSupported, setIsFileSystemAccessSupported] = useState(false);
 const [currentFileName, setCurrentFileName] = useState(null);
             const [activeFileHandle, setActiveFileHandle] = useState(null);
             const [fileStatus, setFileStatus] = useState(null); // 'saving', 'saved', 'error'
@@ -224,9 +225,16 @@ const [projectContext, setProjectContext] = useState("");
 
 // Persist
             useEffect(() => { safeStorage.setItem('differ_source', source); }, [source]);
-            useEffect(() => { safeStorage.setItem('differ_w_input', inputWidth); }, [inputWidth]);
+useEffect(() => { safeStorage.setItem('differ_w_input', inputWidth); }, [inputWidth]);
             useEffect(() => { safeStorage.setItem('differ_w_result', resultWidth); }, [resultWidth]);
 useEffect(() => { safeStorage.setItem('differ_h_queue', queueHeight); }, [queueHeight]);
+
+            // --- FEATURE DETECTION ---
+            useEffect(() => {
+                if ('showDirectoryPicker' in window) {
+                    setIsFileSystemAccessSupported(true);
+                }
+            }, []);
 
             // --- AUTO-SAVE ENGINE ---
             useEffect(() => {
@@ -672,6 +680,10 @@ win.document.write(`<html><head><title>Differ Result Preview</title></head><body
 
 const handleMountFolder = async () => {
                 setShowLoadMenu(false);
+                if (!isFileSystemAccessSupported) {
+                    alert("Your browser does not support local folder access (File System Access API). Try a desktop browser like Chrome or Edge, or use 'Load File (Sandbox)' for single files.");
+                    return;
+                }
                 try {
                     const dirHandle = await window.showDirectoryPicker();
                     const files = [];
@@ -687,6 +699,13 @@ const handleMountFolder = async () => {
                     }
                 } catch (e) {
                     console.error("Mount failed", e);
+                    if (e.name === 'AbortError') {
+                        // User cancelled the picker, no alert needed.
+                    } else if (e.name === 'SecurityError') {
+                        alert("Security Error: Local folder access denied. This might be due to browser security settings or limitations in this PWA environment.");
+                    } else {
+                        alert("Could not access local folder: " + e.message);
+                    }
                 }
             };
 
@@ -1322,7 +1341,11 @@ return (
                                             <button onClick={() => { setShowLoadMenu(false); fileInputRef.current.click(); }} className="px-4 py-3 text-left text-xs font-bold text-slate-300 hover:bg-slate-700 hover:text-white border-b border-slate-700 flex items-center">
                                                 <i className="fa-solid fa-code mr-3 text-blue-400 w-4"></i> Open Session (.json)
                                             </button>
-                                            <button onClick={handleMountFolder} className="px-4 py-3 text-left text-xs font-bold text-slate-300 hover:bg-slate-700 hover:text-white border-b border-slate-700 flex items-center">
+<button 
+                                                onClick={handleMountFolder} 
+                                                disabled={!isFileSystemAccessSupported}
+                                                className={`px-4 py-3 text-left text-xs font-bold flex items-center ${isFileSystemAccessSupported ? 'text-slate-300 hover:bg-slate-700 hover:text-white border-b border-slate-700' : 'text-slate-600 cursor-not-allowed bg-slate-800/50 border-b border-slate-700'}`}
+                                            >
                                                 <i className="fa-solid fa-hard-drive mr-3 text-emerald-400 w-4"></i> Mount Local Folder
                                             </button>
                                             <button onClick={handleSandboxLoad} className="px-4 py-3 text-left text-xs font-bold text-slate-300 hover:bg-slate-700 hover:text-white flex items-center">
