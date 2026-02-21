@@ -1170,25 +1170,50 @@ if (!response.ok) throw new Error(`API Error: ${result.error?.message || respons
             };
 
 const testLocalConnection = async () => {
-                setLocalTestStatus({ type: 'info', msg: 'Pinging 127.0.0.1:11434...' });
+                setLocalTestStatus({ type: 'info', msg: 'Testing Connection...' });
                 const rawUrl = apiKeys.local || 'http://127.0.0.1:11434';
                 const baseUrl = rawUrl.replace(/\/+$/, '').replace('localhost', '127.0.0.1');
-                const target = baseUrl.endsWith('/v1') ? `${baseUrl}/models` : `${baseUrl}/api/tags`;
                 
+                let success = false;
+                let count = 0;
+
                 try {
-                    const res = await fetch(target, { method: 'GET' });
-                    if (res.ok) {
-                        const data = await res.json();
-                        const count = data.models ? data.models.length : (data.data ? data.data.length : 0);
-                        setLocalTestStatus({ type: 'success', msg: `Success! Server at ${baseUrl} returned ${count} models.` });
-                        fetchModels();
-                    } else throw new Error(`HTTP ${res.status}`);
-                } catch (e) {
-                    let diagnosis = "Server not reachable.";
-                    if (window.location.protocol === 'https:') {
-                        diagnosis = "HTTPS/PNA Block. Use 127.0.0.1 (not localhost) and enable CORS.";
+                    // Try Native API First
+                    const nativeBase = baseUrl.replace(/\/v1$/, ''); 
+                    try {
+                        const res = await fetch(`${nativeBase}/api/tags`, { method: 'GET', mode: 'cors' });
+                        if (res.ok) {
+                            const data = await res.json();
+                            count = data.models ? data.models.length : 0;
+                            success = true;
+                        }
+                    } catch (err) { console.log("Native test failed", err); }
+
+                    // Try OpenAI Compat if Native failed
+                    if (!success) {
+                        const v1Url = baseUrl.endsWith('/v1') ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
+                        const res2 = await fetch(v1Url, { method: 'GET', mode: 'cors' });
+                        if (res2.ok) {
+                            const data2 = await res2.json();
+                            count = data2.data ? data2.data.length : 0;
+                            success = true;
+                        } else {
+                            throw new Error(`HTTP ${res2.status}`);
+                        }
                     }
-                    setLocalTestStatus({ type: 'error', msg: `Error: ${e.message}. ${diagnosis}` });
+
+                    if (success) {
+                        setLocalTestStatus({ type: 'success', msg: `Success! Server returned ${count} models.` });
+                        fetchModels();
+                    } else {
+                        throw new Error("Both endpoints failed.");
+                    }
+                } catch (e) {
+                    let diagnosis = "Server unreachable or rejecting connection.";
+                    if (window.location.protocol === 'https:') {
+                        diagnosis = "Blocked by browser (PNA/Mixed Content) or CORS.";
+                    }
+                    setLocalTestStatus({ type: 'error', msg: `Failed to fetch. ${diagnosis}` });
                 }
             };
 
@@ -1454,9 +1479,9 @@ return (
                                                 className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs focus:border-blue-500 outline-none text-slate-300 font-mono"
                                             />
 {prov.id === 'local' && (
-                                                <div className="text-[9px] text-slate-500 leading-tight mt-1">
-                                                    <div className="flex items-center justify-between mb-2 p-1 bg-slate-900/50 rounded border border-slate-800">
-                                                        <span className="font-bold text-slate-400">Connection:</span>
+                                                <div className="text-[9px] text-slate-500 leading-tight mt-2 p-2 bg-black/20 rounded border border-white/5">
+                                                    <div className="flex items-center justify-between mb-2">
+                                                        <span className="font-bold text-slate-400 uppercase text-[8px]">Diagnostics:</span>
                                                         <button 
                                                             onClick={testLocalConnection}
                                                             className="bg-blue-600 hover:bg-blue-500 text-white px-2 py-0.5 rounded text-[8px] font-bold uppercase transition-colors"
@@ -1464,43 +1489,39 @@ return (
                                                             Test Server
                                                         </button>
                                                     </div>
+
                                                     {localTestStatus && (
-                                                        <div className={`mb-2 p-1.5 rounded border text-[8px] leading-tight ${
+                                                        <div className={`mb-3 p-2 rounded border leading-tight ${
                                                             localTestStatus.type === 'success' ? 'bg-emerald-950/30 border-emerald-500 text-emerald-400' :
-                                                            localTestStatus.type === 'error' ? 'bg-rose-950/30 border-rose-500 text-rose-400' :
-                                                            'bg-blue-950/30 border-blue-500 text-blue-400'
+                                                            localTestStatus.type === 'error' ? 'bg-rose-950/30 border-rose-500 text-rose-300' :
+                                                            'bg-blue-950/30 border-blue-500 text-blue-300'
                                                         }`}>
                                                             {localTestStatus.msg}
+                                                            {localTestStatus.type === 'error' && (
+                                                                <div className="mt-2 pt-2 border-t border-white/5 space-y-1 text-slate-400 text-[8px]">
+                                                                    <div className="font-bold text-white uppercase text-[7px]">Troubleshooting (Brave/Chrome):</div>
+                                                                    1. Close Ollama from System Tray completely.<br/>
+                                                                    2. Run: <code className="text-amber-400">$env:OLLAMA_ORIGINS="*"; ollama serve</code><br/>
+                                                                    3. Open <code className="text-blue-400">chrome://flags/#block-insecure-private-network-requests</code> and set to <span className="font-bold text-white">Disabled</span>.<br/>
+                                                                    4. <span className="text-orange-400 font-bold">Brave:</span> Turn off Shields for this site.
+                                                                </div>
+                                                            )}
                                                         </div>
                                                     )}
-                                                    If blocked by CORS, Close Ollama in Tray then restart with:<br/>
-                                                    <code className="text-amber-400 bg-amber-900/30 border border-amber-900/50 px-1 py-0.5 rounded select-all block mt-1 mb-2">
-                                                        $env:OLLAMA_ORIGINS="*"; ollama serve
-                                                    </code>
-                                                    
-                                                    {selectedProvider === 'local' ? (
-                                                        availableModels.length > 0 ? (
-                                                            <div className="mt-2 pt-2 border-t border-slate-800">
-                                                                <label className="text-[9px] font-bold text-emerald-400 uppercase block mb-1">Detected Local Models:</label>
-                                                                <select 
-                                                                    value={selectedModel}
-                                                                    onChange={(e) => {
-                                                                        setSelectedModel(e.target.value);
-                                                                        safeStorage.setItem('differ_model', e.target.value);
-                                                                    }}
-                                                                    className="w-full bg-slate-950 border border-emerald-900/50 rounded px-2 py-1.5 text-[10px] focus:border-emerald-500 outline-none text-emerald-300 font-mono"
-                                                                >
-                                                                    {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
-                                                                </select>
-                                                            </div>
-                                                        ) : (
-                                                            <div className="mt-2 pt-2 border-t border-slate-800 text-rose-400 font-bold uppercase tracking-wider flex items-center gap-1">
-                                                                <i className="fa-solid fa-triangle-exclamation"></i> No Models Detected
-                                                            </div>
-                                                        )
-                                                    ) : (
-                                                        <div className="mt-2 pt-2 border-t border-slate-800 text-slate-600 font-bold uppercase tracking-wider text-[8px]">
-                                                            Select 'Local' in the chat footer to test connection.
+
+                                                    {selectedProvider === 'local' && availableModels.length > 0 && (
+                                                        <div className="mt-2 pt-2 border-t border-white/10">
+                                                            <label className="text-[8px] font-bold text-emerald-400 uppercase block mb-1">Detected Models:</label>
+                                                            <select 
+                                                                value={selectedModel}
+                                                                onChange={(e) => {
+                                                                    setSelectedModel(e.target.value);
+                                                                    safeStorage.setItem('differ_model', e.target.value);
+                                                                }}
+                                                                className="w-full bg-slate-950 border border-white/10 rounded px-2 py-1 text-[10px] text-emerald-300 font-mono"
+                                                            >
+                                                                {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
+                                                            </select>
                                                         </div>
                                                     )}
                                                 </div>
