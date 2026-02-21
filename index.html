@@ -93,7 +93,21 @@
 <<<< SEARCH
         <h1>Welcome Back</h1>
 ==== REPLACE
-        <h1 style="color: #4ade80">Welcome Back, User</h1>`;
+<h1 style="color: #4ade80">Welcome Back, User</h1>`;
+
+        const SYSTEM_PROMPT = `You are a Code Maintenance Agent using the Differ V5 patching engine. Follow the "Zero-Drift" Protocol:
+1. PRESERVATION ANCHORS (MANDATORY): For SEARCH blocks > 3 lines, use '>>' to skip the middle.
+   - CHAIN anchors to keep code: A >> B >> C
+   - To PRESERVE the skipped code in output, use '>>' in the REPLACE block too!
+   <<<< SEARCH
+   function massive() { >> }
+   ==== REPLACE
+   function massive(newParam) { >> }
+   >>>>
+2. CONTEXT HYGIENE: Use exactly 1-2 lines of highly unique context.
+3. INCEPTION SAFETY: If patching patch-logic, use 5-char fences (<<<<< SEARCH).
+4. FUZZY MATCH: The engine ignores quote types and semicolons.
+5. FORMATTING: No Git markers (<<<<<<<). Output ONLY patch blocks.`;
 
         // --- V3.0 SANDBOX POLYFILL ENGINE ---
 const SANDBOX_POLYFILL = '<script>\n' +
@@ -136,8 +150,8 @@ const SANDBOX_POLYFILL = '<script>\n' +
             const [patchesRaw, setPatchesRaw] = useState(safeStorage.getItem('differ_patches') || DEMO_PATCH);
             const [parsedPatches, setParsedPatches] = useState([]);
             const [disabledPatches, setDisabledPatches] = useState(new Set()); 
-            const [preview, setPreview] = useState("");
-const [stats, setStats] = useState({ total: 0, matched: 0, failed: 0, applied: 0 });
+const [preview, setPreview] = useState("");
+            const [stats, setStats] = useState({ total: 0, matched: 0, failed: 0, applied: 0 });
             const [visualHighlights, setVisualHighlights] = useState([]);
 
             // History State
@@ -186,8 +200,9 @@ const [showDiff, setShowDiff] = useState(false);
             const [isResizingH, setIsResizingH] = useState(false);
             const [isResizingR, setIsResizingR] = useState(false);
 const [isResizingV, setIsResizingV] = useState(false);
-            const [isAiGenerating, setIsAiGenerating] = useState(false);
+const [isAiGenerating, setIsAiGenerating] = useState(false);
             const [aiError, setAiError] = useState(null);
+            const [isFixingPatch, setIsFixingPatch] = useState(null);
             const [aiPrompt, setAiPrompt] = useState("");
 const [selectedProvider, setSelectedProvider] = useState(safeStorage.getItem('differ_provider') || 'gemini');
             const [availableModels, setAvailableModels] = useState([]);
@@ -223,9 +238,9 @@ const [projectContext, setProjectContext] = useState("");
             }, [showSupportModal]);
             const [codeIndex, setCodeIndex] = useState([]);
             const [indexFilters, setIndexFilters] = useState({ defs: true, regions: true, events: true, iife: true });
-            const [apiKeys, setApiKeys] = useState(() => {
+const [apiKeys, setApiKeys] = useState(() => {
                 const saved = safeStorage.getItem('differ_api_keys');
-                return saved ? JSON.parse(saved) : { gemini: '', openai: '', xai: '', claude: '', local: 'http://localhost:11434/v1' };
+                return saved ? JSON.parse(saved) : { gemini: '', openai: '', xai: '', claude: '', local: 'http://127.0.0.1:11434/v1' };
             });
 
 // Refs
@@ -405,14 +420,14 @@ useEffect(() => {
 
             useEffect(() => {
                 const timerId = setTimeout(() => {
-        const rawList = parseRawPatches(patchesRaw, parserMode);
+const rawList = parseRawPatches(patchesRaw, parserMode);
         const result = processPatches(source, rawList, disabledPatches, ignoreIndentation);
         
         setParsedPatches(result.patches);
-                    setPreview(result.finalCode);
-                    setStats(result.stats);
+        setPreview(result.finalCode);
+        setStats(result.stats);
 
-const highlights = scanForHighlights(source, rawList, ignoreIndentation);
+        const highlights = scanForHighlights(source, rawList, ignoreIndentation);
         setVisualHighlights(highlights);
     }, 300);
 
@@ -471,16 +486,31 @@ const findBestMatch = (fullText, chunk, ignoreIndent = ignoreIndentation) => {
                     return { found: true, start: preText.length, end: preText.length + targetText.length };
                 }
 
-// STRATEGY 2: Range Anchors (Top >> Bottom)
-// V3.5: Extreme anchor split (handles start-of-block, varied newlines, and trailing whitespace)
+// STRATEGY 2: Range Anchors & Preservation Chaining (Top >> Middle >> Bottom)
                 const anchorSplit = chunk.split(/(?:\r?\n|^)[ \t]*>>[ \t]*(?:\r?\n|$)/);
-                if (anchorSplit.length === 2) {
-                    const topMatch = findBestMatch(fullText, anchorSplit[0], ignoreIndent);
-                    if (!topMatch.found) return { found: false, reason: "Start anchor not found" };
-                    const searchFrom = topMatch.end;
-                    const btmMatch = findBestMatch(fullText.substring(searchFrom), anchorSplit[1], ignoreIndent);
-                    if (!btmMatch.found) return { found: false, reason: "End anchor not found after start" };
-                    return { found: true, start: topMatch.start, end: searchFrom + btmMatch.end };
+                if (anchorSplit.length > 1) {
+                    let currentSearchFrom = 0;
+                    let matchStart = -1;
+                    let lastMatchEnd = -1;
+                    const gaps = [];
+
+                    for (let i = 0; i < anchorSplit.length; i++) {
+                        const partMatch = findBestMatch(fullText.substring(currentSearchFrom), anchorSplit[i], ignoreIndent);
+                        if (!partMatch.found) return { found: false, reason: `Anchor part ${i+1} not found` };
+
+                        const absStart = currentSearchFrom + partMatch.start;
+                        const absEnd = currentSearchFrom + partMatch.end;
+
+                        if (i === 0) {
+                            matchStart = absStart;
+                        } else {
+                            gaps.push(fullText.substring(lastMatchEnd, absStart));
+                        }
+
+                        lastMatchEnd = absEnd;
+                        currentSearchFrom = absEnd;
+                    }
+                    return { found: true, start: matchStart, end: lastMatchEnd, gaps };
                 }
 
                 // STRATEGY 3: Standard Block Match (Exact & Soft)
@@ -549,7 +579,21 @@ const matchResult = findBestMatch(modifiedCode, p.search);
                         matchedCount++;
                         const pre = modifiedCode.substring(0, matchResult.start);
                         const post = modifiedCode.substring(matchResult.end);
-                        modifiedCode = pre + p.replace + post;
+                        
+                        let finalReplace = p.replace;
+                        // Preservation Engine: If REPLACE contains '>>', weave the captured gaps back in
+                        if (matchResult.gaps && matchResult.gaps.length > 0) {
+                            const replaceParts = p.replace.split(/(?:\r?\n|^)[ \t]*>>[ \t]*(?:\r?\n|$)/);
+                            // Only interleave if the number of anchors matches exactly
+                            if (replaceParts.length === matchResult.gaps.length + 1) {
+                                finalReplace = replaceParts[0];
+                                for (let j = 0; j < matchResult.gaps.length; j++) {
+                                    finalReplace += matchResult.gaps[j] + replaceParts[j+1];
+                                }
+                            }
+                        }
+
+                        modifiedCode = pre + finalReplace + post;
                         info.status = 'success';
                         info.line = modifiedCode.substring(0, matchResult.start).split('\n').length;
                         processed.push(info);
@@ -639,7 +683,7 @@ const matchResult = findBestMatch(modifiedCode, p.search);
 
 const exportSession = () => {
                 const session = {
-                    source, patchesRaw, patchLog,
+                    source, patchesRaw, patchLog, blueprint, analytics,
                     settings: { showInputColumn, showMiniMap, showLineNumbers, renderMode, ignoreIndentation, parserMode }
                 };
                 const blob = new Blob([JSON.stringify(session, null, 2)], { type: 'application/json' });
@@ -686,8 +730,10 @@ const importSession = (e) => {
                     try {
                         const data = JSON.parse(ev.target.result);
                         if (data.source) setSource(data.source);
-                        if (data.patchesRaw) setPatchesRaw(data.patchesRaw);
+if (data.patchesRaw) setPatchesRaw(data.patchesRaw);
                         if (data.patchLog) setPatchLog(data.patchLog);
+                        if (data.blueprint) setBlueprint(data.blueprint);
+                        if (data.analytics) setAnalytics(data.analytics);
                         if (data.settings) {
                             if (data.settings.parserMode) setParserMode(data.settings.parserMode);
                             setIgnoreIndentation(!!data.settings.ignoreIndentation);
@@ -932,9 +978,9 @@ const fetchModels = async () => {
 // OpenAI / xAI / Local (Ollama)
                     let url, headers = { 'Content-Type': 'application/json' };
                     
-                    if (selectedProvider === 'local') {
+if (selectedProvider === 'local') {
                         // OLLAMA ROBUST FETCH STRATEGY
-                        let rawKey = key || 'http://localhost:11434';
+                        let rawKey = key || 'http://127.0.0.1:11434';
                         if (!/^https?:\/\//i.test(rawKey)) rawKey = 'http://' + rawKey; // Ensure protocol
                         let baseUrl = rawKey.replace(/\/+$/, ''); // Remove trailing slash
                         
@@ -942,7 +988,7 @@ const fetchModels = async () => {
                         try {
                             const nativeBase = baseUrl.replace(/\/v1$/, ''); 
                             const nativeUrl = `${nativeBase}/api/tags`;
-                            const res = await fetch(nativeUrl, { headers });
+                            const res = await fetch(nativeUrl); // Omit headers on GET for CORS
                             if (res.ok) {
                                 const data = await res.json();
                                 if (data.models) {
@@ -957,7 +1003,7 @@ const fetchModels = async () => {
                         // Strategy 2: Try OpenAI-Compatible Endpoint (/v1/models)
                         try {
                             const v1Url = baseUrl.endsWith('/v1') ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
-                            const res = await fetch(v1Url, { headers });
+                            const res = await fetch(v1Url); // Omit headers on GET for CORS
                             if (res.ok) {
                                 const data = await res.json();
                                 if (data.data && data.data.length > 0) {
@@ -1061,7 +1107,10 @@ useEffect(() => { fetchModels(); }, [selectedProvider, apiKeys]);
 const callAI = async (prompt, system) => {
                 let key = apiKeys[selectedProvider];
                 
-                if (!key && selectedProvider === 'local') key = 'http://localhost:11434';
+                // Allow empty key for local (fallback to default)
+                if (!key && selectedProvider === 'local') {
+                    key = 'http://127.0.0.1:11434';
+                }
                 if (!key) throw new Error(`No API key found for ${selectedProvider}`);
 
                 let url, body, headers = { 'Content-Type': 'application/json' };
@@ -1096,66 +1145,135 @@ const callAI = async (prompt, system) => {
                     const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
 const result = await response.json();
                     
-                    if (response.ok) {
-                        // Track Token Analytics
-                        const estimatedTokens = Math.ceil((prompt.length + system.length) / 4);
-                        setAnalytics(prev => {
-                            const next = {
-                                ...prev,
-                                totalCalls: (prev.totalCalls || 0) + 1,
-                                tokens: { ...prev.tokens, [selectedProvider]: (prev.tokens?.[selectedProvider] || 0) + estimatedTokens }
-                            };
-                            safeStorage.setItem('differ_analytics', JSON.stringify(next));
-                            return next;
-                        });
-                    }
-                    if (!response.ok) throw new Error(`API Error: ${result.error?.message || response.statusText}`);
+if (!response.ok) throw new Error(`API Error: ${result.error?.message || response.statusText}`);
+                    
                     let output;
                     if (selectedProvider === 'gemini') output = result.candidates?.[0]?.content?.parts?.[0]?.text;
                     else if (['openai', 'xai', 'local'].includes(selectedProvider)) output = result.choices?.[0]?.message?.content;
                     else if (selectedProvider === 'claude') output = result.content?.[0]?.text;
+                    
+                    // Track Input & Output Tokens
+                    const estimatedTokens = Math.ceil((prompt.length + system.length + (output?.length || 0)) / 4);
+                    setAnalytics(prev => {
+                        const next = {
+                            ...prev,
+                            totalCalls: (prev.totalCalls || 0) + 1,
+                            totalTokens: (prev.totalTokens || 0) + estimatedTokens,
+                            tokens: { ...prev.tokens, [selectedProvider]: (prev.tokens?.[selectedProvider] || 0) + estimatedTokens }
+                        };
+                        safeStorage.setItem('differ_analytics', JSON.stringify(next));
+                        return next;
+                    });
+                    
                     return output;
                 } catch (e) { throw e; }
             };
 
-            const toggleContextFile = (name) => {
+const toggleContextFile = (name) => {
                 const next = new Set(contextSelection);
                 if (next.has(name)) next.delete(name); else next.add(name);
                 setContextSelection(next);
             };
 
+            const toggleAllContext = () => {
+                if (contextSelection.size === projectFiles.length) setContextSelection(new Set());
+                else setContextSelection(new Set(projectFiles.map(f => f.name)));
+            };
+
+            const syncProjectContext = async () => {
+                setIsSyncing(true);
+                try {
+                    let contextStr = "";
+                    for (const file of projectFiles) {
+                        if (contextSelection.has(file.name)) {
+                            const content = file.getFile ? await (await file.getFile()).text() : await file.text();
+                            contextStr += `--- FILE: ${file.name} ---\n${content}\n\n`;
+                        }
+                    }
+                    setProjectContext(contextStr);
+                    setShowSyncMenu(false);
+                } catch (e) { alert("Sync failed: " + e.message); }
+                finally { setIsSyncing(false); }
+            };
+
             const generateAiPatch = async () => {
                 if (!aiPrompt.trim()) return;
                 setIsAiGenerating(true); setAiError(null);
-                const V3_PROMPT = `You are a Code Maintenance Agent using the Differ V3 patching engine. Follow the "Zero-Drift" Protocol:
 
-1. ANCHOR MODE (MANDATORY): For SEARCH blocks > 9 lines, use '>>' to skip the middle.
-   <<<< SEARCH
-   [Unique Start Context]
-   >>
-   [Unique End Context]
-   ==== REPLACE
-   ...
-   >>>>
-
-2. CONTEXT HYGIENE: Use exactly 2 lines of unique context. Do not guess indentation.
-3. INCEPTION SAFETY: If patching code that contains patch markers (like this prompt), use 5-char fences (<<<<< SEARCH).
-4. VARIABLE AUDIT: Do not re-declare existing variables. Check the source first.
-5. FORMATTING: No line numbers. No Git markers (<<<<<<<). Output ONLY the patch blocks.`;
                 try {
-                    const contextPrefix = projectContext ? `PROJECT CONTEXT:\n${projectContext}\n\n` : "";
-                    const rawText = await callAI(`${contextPrefix}CURRENT FILE (${currentFileName || 'unsaved'}):\n${source}\n\nTASK: ${aiPrompt}`, V3_PROMPT);
-                    let cleanText = rawText.replace(/```.*?\n/g, '').replace(/```/g, '').trim();
-                    cleanText = cleanText
-                        .replace(/^<{7,}\s*(?:SEARCH)?/gm, '<<<< SEARCH')
-                        .replace(/^={7,}\s*$/gm, '==== REPLACE')
-                        .replace(/^>{7,}(?:\s*REPLACE)?.*$/gm, '>>>>>');
-                    setPatchesRaw(prev => (prev ? prev + "\n\n" : "") + cleanText);
+                    if (mainTab === 'blueprint') {
+                        // Plan Mode: Generate/Update Markdown directly
+                        const BP_PROMPT = "You are an Architect. Update the project blueprint based on the user request. Output ONLY the raw markdown of the new blueprint. Do not use patch blocks or fences.";
+                        const rawText = await callAI(`CURRENT BLUEPRINT:\n${blueprint}\n\nTASK: ${aiPrompt}`, BP_PROMPT);
+                        const cleanText = rawText.replace(/^```[a-z]*\n/i, '').replace(/```$/, '').trim();
+                        setBlueprint(cleanText);
+                    } else {
+                        // Code Mode: Generate patches based on Source + Blueprint
+                        const contextPrefix = projectContext ? `PROJECT CONTEXT:\n${projectContext}\n\n` : "";
+                        const planPrefix = blueprint.trim() !== '# Project Blueprint' ? `BLUEPRINT PLAN:\n${blueprint}\n\n` : "";
+                        const rawText = await callAI(`${contextPrefix}${planPrefix}CURRENT FILE (${currentFileName || 'unsaved'}):\n${source}\n\nTASK: ${aiPrompt}`, SYSTEM_PROMPT);
+                        
+                        let cleanText = rawText.replace(/```.*?\n/g, '').replace(/```/g, '').trim();
+                        cleanText = cleanText
+                            .replace(/^<{7,}\s*(?:SEARCH)?/gm, '<<<< SEARCH')
+                            .replace(/^={7,}\s*$/gm, '==== REPLACE')
+                            .replace(/^>{7,}(?:\s*REPLACE)?.*$/gm, '>>>>');
+                            
+                        setPatchesRaw(prev => (prev ? prev + "\n\n" : "") + cleanText);
+                    }
                     setAiPrompt(""); 
                 } catch (err) { setAiError(err.message); } finally { setIsAiGenerating(false); }
             };
 
-            const isDragging = isResizingH || isResizingR || isResizingV;
+            const handleAutoFixPatch = async (patch) => {
+                setIsFixingPatch(patch.id);
+                try {
+                    const prompt = `Your previous patch failed to apply.
+ERROR REASON: ${patch.reason}
+
+FAILED PATCH BLOCK:
+${patch.rawBlock}
+
+CURRENT FILE SOURCE:
+${source}
+
+TASK: Rewrite this patch to match the current file source perfectly. Fix the whitespace or logic mismatch. Use Anchor Mode (>>) if the block is over 3 lines.`;
+                    
+                    const newPatchText = await callAI(prompt, SYSTEM_PROMPT);
+                    let cleanText = newPatchText.replace(/```.*?\n/g, '').replace(/```/g, '').trim();
+                    cleanText = cleanText.replace(/^<{7,}\s*(?:SEARCH)?/gm, '<<<< SEARCH').replace(/^={7,}\s*$/gm, '==== REPLACE').replace(/^>{7,}(?:\s*REPLACE)?.*$/gm, '>>>>');
+                    
+                    setPatchesRaw(prev => prev.replace(patch.rawBlock, cleanText));
+                } catch (e) {
+                    alert("Auto-fix failed: " + e.message);
+                } finally {
+                    setIsFixingPatch(null);
+                }
+            };
+
+            const handleFixConsoleError = async (log) => {
+                setLeftTab('queue');
+                setIsAiGenerating(true); setAiError(null);
+                try {
+                    const prompt = `The application threw the following runtime error:
+[${log.method.toUpperCase()}] ${log.payload.join(" ")}
+
+CURRENT FILE SOURCE:
+${source}
+
+TASK: Identify the cause of this error in the code and generate a patch to fix it.`;
+                    const newPatchText = await callAI(prompt, SYSTEM_PROMPT);
+                    let cleanText = newPatchText.replace(/```.*?\n/g, '').replace(/```/g, '').trim();
+                    cleanText = cleanText.replace(/^<{7,}\s*(?:SEARCH)?/gm, '<<<< SEARCH').replace(/^={7,}\s*$/gm, '==== REPLACE').replace(/^>{7,}(?:\s*REPLACE)?.*$/gm, '>>>>');
+                    setPatchesRaw(prev => (prev ? prev + "\n\n" : "") + cleanText);
+                } catch (e) {
+                    setAiError("Console Fix Error: " + e.message);
+                } finally {
+                    setIsAiGenerating(false);
+                }
+            };
+
+const isDragging = isResizingH || isResizingR || isResizingV;
 
 return (
                 <div className={`flex flex-col h-screen bg-slate-900 text-slate-300 font-sans relative ${isDragging ? 'select-none' : ''}`}>
@@ -1176,13 +1294,16 @@ return (
                                 <h2 className="text-xl font-bold text-white mb-2">Buy Me a Coffee</h2>
                                 <p className="text-xs text-slate-400 mb-6">Support the development of Differ V3.</p>
 <div id="paypal-container" className="min-h-[60px] bg-slate-950 rounded border border-slate-800 p-4 flex flex-col items-center justify-center gap-2">
-                                    <div className="text-[10px] text-amber-500 font-bold">Preview Mode: SDK Disabled</div>
+                                    <div className="text-[10px] text-amber-500 font-bold">Support the Project</div>
                                     <div className="text-[9px] text-slate-500 text-center leading-tight">
-                                        The PayPal SDK cannot run in this sandboxed editor.<br/>
-                                        It will function correctly when you export and deploy.
+                                        Differ is open-source. Donations help keep the<br/>
+                                        intelligence engine running and up-to-date.
                                     </div>
-                                    <button className="mt-2 bg-[#FFC439] text-slate-900 px-4 py-1.5 rounded-full text-xs font-bold font-sans opacity-50 cursor-not-allowed">
-                                        <i className="fa-brands fa-paypal mr-1"></i> Donate
+                                    <button 
+                                        onClick={() => window.open('https://www.paypal.com/donate', '_blank')}
+                                        className="mt-2 bg-[#FFC439] hover:bg-[#f2ba36] text-slate-900 px-6 py-1.5 rounded-full text-xs font-bold font-sans transition-colors shadow-lg"
+                                    >
+                                        <i className="fa-brands fa-paypal mr-1"></i> Donate via PayPal
                                     </button>
                                 </div>
                             </div>
@@ -1234,7 +1355,7 @@ return (
                                         <div className="space-y-4">
                                             {/* 3. Range Anchors */}
                                             <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                                                <div className="text-xs font-bold text-purple-400 mb-2 uppercase tracking-wider">3. Range Anchors</div>
+                                                <div className="text-xs font-bold text-purple-400 mb-2 uppercase tracking-wider">>>>. Range Anchors</div>
                                                 <pre className="text-[10px] font-mono text-slate-400 leading-relaxed opacity-80">
 {`<<<< SEARCH
   Start Anchor
@@ -1299,16 +1420,22 @@ return (
                                                 <i className={`${prov.icon} ${prov.color} w-3`}></i> {prov.label}
                                             </label>
                                             <input 
-                                                type="password"
+                                                type={prov.id === 'local' ? 'text' : 'password'}
                                                 value={apiKeys[prov.id]}
                                                 onChange={(e) => {
                                                     const next = { ...apiKeys, [prov.id]: e.target.value };
                                                     setApiKeys(next);
                                                     safeStorage.setItem('differ_api_keys', JSON.stringify(next));
                                                 }}
-                                                placeholder={prov.id === 'local' ? 'Endpoint URL...' : 'Paste API Key...'}
+                                                placeholder={prov.id === 'local' ? 'http://127.0.0.1:11434' : 'Paste API Key...'}
                                                 className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs focus:border-blue-500 outline-none text-slate-300 font-mono"
                                             />
+                                            {prov.id === 'local' && (
+                                                <div className="text-[9px] text-slate-500 leading-tight mt-1">
+                                                    Hosted PWAs require Ollama to allow CORS. Run:<br/>
+                                                    <code className="text-amber-400 bg-amber-900/30 border border-amber-900/50 px-1 py-0.5 rounded select-all block mt-1">OLLAMA_ORIGINS="*" ollama serve</code>
+                                                </div>
+                                            )}
                                         </div>
                                     ))}
                                 </div>
@@ -1433,7 +1560,18 @@ return (
                                                     <div className="flex justify-between"><strong className="truncate">{p.label || `Patch #${i+1}`}</strong><span>{p.status === 'success' || p.status === 'applied' ? `L:${p.line}` : ''}</span></div>
                                                     <div className="opacity-50 mt-1 font-mono truncate">{(p.status === 'applied' ? 'ALREADY APPLIED' : p.search).substring(0, 40).replace(/\n/g, ' ')}...</div>
                                                 </div>
-                                                {p.status === 'success' && (<div className="queue-actions absolute inset-y-0 right-0 bg-slate-900/90 pl-2 flex items-center pr-2"><button onClick={() => applySinglePatch(p.id)} className="bg-blue-600 text-white px-2 py-1 rounded text-[9px] font-bold uppercase hover:bg-blue-500 shadow-sm">Commit</button></div>)}
+{p.status === 'success' && (<div className="queue-actions absolute inset-y-0 right-0 bg-slate-900/90 pl-2 flex items-center pr-2"><button onClick={() => applySinglePatch(p.id)} className="bg-blue-600 text-white px-2 py-1 rounded text-[9px] font-bold uppercase hover:bg-blue-500 shadow-sm">Commit</button></div>)}
+                                                {p.status === 'error' && (
+                                                    <div className="queue-actions absolute inset-y-0 right-0 bg-slate-900/90 pl-2 flex items-center pr-2">
+                                                        <button 
+                                                            onClick={() => handleAutoFixPatch(p)} 
+                                                            disabled={isFixingPatch === p.id}
+                                                            className="bg-purple-600 text-white px-2 py-1 rounded text-[9px] font-bold uppercase hover:bg-purple-500 shadow-sm disabled:opacity-50"
+                                                        >
+                                                            {isFixingPatch === p.id ? 'Fixing...' : 'Auto-Fix'}
+                                                        </button>
+                                                    </div>
+                                                )}
                                             </div>
                                         ))}
                                     </React.Fragment>
@@ -1561,8 +1699,9 @@ onChange={(e) => {
 codeIndex.filter(item => indexFilters[item.type]).map((item, i) => (
                                                             <button 
                                                                 key={i}
-                                                                onClick={() => {
+onClick={() => {
                                                                     // 1. Prepare UI
+                                                                    if (mainTab !== 'editor') setMainTab('editor');
                                                                     if (showDiff) setShowDiff(false); // Ensure editor is visible
                                                                     setShowIndexMenu(false);
                                                                     setActiveHighlight({ start: item.line, end: item.end });
