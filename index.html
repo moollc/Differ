@@ -200,9 +200,9 @@ const [showDiff, setShowDiff] = useState(false);
             const [isResizingH, setIsResizingH] = useState(false);
             const [isResizingR, setIsResizingR] = useState(false);
 const [isResizingV, setIsResizingV] = useState(false);
-const [isAiGenerating, setIsAiGenerating] = useState(false);
+            const [isAiGenerating, setIsAiGenerating] = useState(false);
             const [aiError, setAiError] = useState(null);
-            const [isFixingPatch, setIsFixingPatch] = useState(null);
+            const [localTestStatus, setLocalTestStatus] = useState(null);
             const [aiPrompt, setAiPrompt] = useState("");
 const [selectedProvider, setSelectedProvider] = useState(safeStorage.getItem('differ_provider') || 'gemini');
             const [availableModels, setAvailableModels] = useState([]);
@@ -982,7 +982,7 @@ if (selectedProvider === 'local') {
                         // OLLAMA ROBUST FETCH STRATEGY
                         let rawKey = key || 'http://127.0.0.1:11434';
                         if (!/^https?:\/\//i.test(rawKey)) rawKey = 'http://' + rawKey; // Ensure protocol
-                        let baseUrl = rawKey.replace(/\/+$/, ''); // Remove trailing slash
+                        let baseUrl = rawKey.replace(/\/+$/, '').replace('localhost', '127.0.0.1');
                         
                         // Strategy 1: Try Native Endpoint (/api/tags) - Prioritized for reliability
                         try {
@@ -1169,7 +1169,30 @@ if (!response.ok) throw new Error(`API Error: ${result.error?.message || respons
                 } catch (e) { throw e; }
             };
 
-const toggleContextFile = (name) => {
+const testLocalConnection = async () => {
+                setLocalTestStatus({ type: 'info', msg: 'Pinging 127.0.0.1:11434...' });
+                const rawUrl = apiKeys.local || 'http://127.0.0.1:11434';
+                const baseUrl = rawUrl.replace(/\/+$/, '').replace('localhost', '127.0.0.1');
+                const target = baseUrl.endsWith('/v1') ? `${baseUrl}/models` : `${baseUrl}/api/tags`;
+                
+                try {
+                    const res = await fetch(target, { method: 'GET' });
+                    if (res.ok) {
+                        const data = await res.json();
+                        const count = data.models ? data.models.length : (data.data ? data.data.length : 0);
+                        setLocalTestStatus({ type: 'success', msg: `Success! Server at ${baseUrl} returned ${count} models.` });
+                        fetchModels();
+                    } else throw new Error(`HTTP ${res.status}`);
+                } catch (e) {
+                    let diagnosis = "Server not reachable.";
+                    if (window.location.protocol === 'https:') {
+                        diagnosis = "HTTPS/PNA Block. Use 127.0.0.1 (not localhost) and enable CORS.";
+                    }
+                    setLocalTestStatus({ type: 'error', msg: `Error: ${e.message}. ${diagnosis}` });
+                }
+            };
+
+            const toggleContextFile = (name) => {
                 const next = new Set(contextSelection);
                 if (next.has(name)) next.delete(name); else next.add(name);
                 setContextSelection(next);
@@ -1430,10 +1453,30 @@ return (
                                                 placeholder={prov.id === 'local' ? 'http://127.0.0.1:11434' : 'Paste API Key...'}
                                                 className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-xs focus:border-blue-500 outline-none text-slate-300 font-mono"
                                             />
-                                            {prov.id === 'local' && (
+{prov.id === 'local' && (
                                                 <div className="text-[9px] text-slate-500 leading-tight mt-1">
-                                                    If blocked by CORS, restart your Ollama server with:<br/>
-                                                    <code className="text-amber-400 bg-amber-900/30 border border-amber-900/50 px-1 py-0.5 rounded select-all block mt-1 mb-2">OLLAMA_ORIGINS="*" ollama serve</code>
+                                                    <div className="flex items-center justify-between mb-2 p-1 bg-slate-900/50 rounded border border-slate-800">
+                                                        <span className="font-bold text-slate-400">Connection:</span>
+                                                        <button 
+                                                            onClick={testLocalConnection}
+                                                            className="bg-blue-600 hover:bg-blue-500 text-white px-2 py-0.5 rounded text-[8px] font-bold uppercase transition-colors"
+                                                        >
+                                                            Test Server
+                                                        </button>
+                                                    </div>
+                                                    {localTestStatus && (
+                                                        <div className={`mb-2 p-1.5 rounded border text-[8px] leading-tight ${
+                                                            localTestStatus.type === 'success' ? 'bg-emerald-950/30 border-emerald-500 text-emerald-400' :
+                                                            localTestStatus.type === 'error' ? 'bg-rose-950/30 border-rose-500 text-rose-400' :
+                                                            'bg-blue-950/30 border-blue-500 text-blue-400'
+                                                        }`}>
+                                                            {localTestStatus.msg}
+                                                        </div>
+                                                    )}
+                                                    If blocked by CORS, Close Ollama in Tray then restart with:<br/>
+                                                    <code className="text-amber-400 bg-amber-900/30 border border-amber-900/50 px-1 py-0.5 rounded select-all block mt-1 mb-2">
+                                                        $env:OLLAMA_ORIGINS="*"; ollama serve
+                                                    </code>
                                                     
                                                     {selectedProvider === 'local' ? (
                                                         availableModels.length > 0 ? (
@@ -1634,9 +1677,13 @@ return (
                                             </span>
                                             <select 
                                                 value={selectedProvider} 
-onChange={(e) => {
-                                                    setSelectedProvider(e.target.value);
-                                                    safeStorage.setItem('differ_provider', e.target.value);
+                                                onChange={(e) => {
+                                                    const nextProv = e.target.value;
+                                                    setSelectedProvider(nextProv);
+                                                    safeStorage.setItem('differ_provider', nextProv);
+                                                    // Clear state to prevent cross-contamination
+                                                    setAvailableModels([]);
+                                                    setSelectedModel('');
                                                 }}
                                                 className="bg-slate-900 border border-slate-700 rounded-sm px-1 text-[9px] font-bold text-slate-300 outline-none cursor-pointer hover:bg-slate-800 transition-colors"
                                             >
@@ -1659,17 +1706,28 @@ onChange={(e) => {
                                                 </select>
                                             )}
                                             {availableModels.length === 0 && selectedProvider === 'local' && (
-                                                <input 
-                                                    type="text"
-                                                    value={selectedModel}
-                                                    onChange={(e) => {
-                                                        setSelectedModel(e.target.value);
-                                                        safeStorage.setItem('differ_model', e.target.value);
-                                                    }}
-                                                    placeholder="Model ID..."
-                                                    className="bg-transparent text-[9px] font-bold text-rose-400 outline-none border-l border-slate-700 pl-2 ml-1 w-20"
-                                                />
+                                                <div className="flex items-center">
+                                                    <input 
+                                                        type="text"
+                                                        value={selectedModel}
+                                                        onChange={(e) => {
+                                                            setSelectedModel(e.target.value);
+                                                            safeStorage.setItem('differ_model', e.target.value);
+                                                        }}
+                                                        placeholder="Type Model ID..."
+                                                        title="CORS Fix: 1. Close Ollama in Tray. 2. Windows/PowerShell: $env:OLLAMA_ORIGINS='*'; ollama serve | Mac/Linux: OLLAMA_ORIGINS='*' ollama serve"
+                                                        className="bg-transparent text-[9px] font-bold text-rose-400 outline-none border-l border-slate-700 pl-2 ml-1 w-24"
+                                                    />
+                                                    <button 
+                                                        onClick={() => fetchModels()}
+                                                        className="ml-1.5 text-slate-500 hover:text-emerald-400 transition-colors"
+                                                        title="Retry Connection"
+                                                    >
+                                                        <i className="fa-solid fa-arrows-rotate text-[8px]"></i>
+                                                    </button>
+                                                </div>
                                             )}
+
                                         </div>
 {!apiKeys[selectedProvider] && (
                                             <button onClick={() => setShowApiModal(true)} className="text-[8px] text-amber-500 hover:underline">{selectedProvider === 'local' ? 'Set URL' : 'Set Key'}</button>
