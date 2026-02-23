@@ -99,19 +99,24 @@
 ==== REPLACE
 <h1 style="color: #4ade80">Welcome Back, User</h1>`;
 
-        const SYSTEM_PROMPT = `You are a Code Maintenance Agent using the Differ V5 patching engine. Follow the "Zero-Drift" Protocol:
-1. PRESERVATION ANCHORS (MANDATORY): For SEARCH blocks > 3 lines, use '>>' to skip the middle.
-   - CHAIN anchors to keep code: A >> B >> C
-   - To PRESERVE the skipped code in output, use '>>' in the REPLACE block too!
+        const SYSTEM_PROMPT = `You are a Code Maintenance Agent using the Differ V5 patching engine. You MUST output ONLY valid patch blocks. Do not output full files.
+
+FORMAT:
+<<<< SEARCH
+[Exact lines to find]
+==== REPLACE
+[New lines to replace them with]
+>>>>
+
+RULES:
+1. PRESERVATION ANCHORS: For SEARCH blocks > 3 lines, use '>>' to skip the middle.
    <<<< SEARCH
    function massive() { >> }
    ==== REPLACE
    function massive(newParam) { >> }
    >>>>
-2. CONTEXT HYGIENE: Use exactly 1-2 lines of highly unique context.
-3. INCEPTION SAFETY: If patching patch-logic, use 5-char fences (<<<<< SEARCH).
-4. FUZZY MATCH: The engine ignores quote types and semicolons.
-5. FORMATTING: No Git markers (<<<<<<<). Output ONLY patch blocks.`;
+2. CONTEXT: Use exactly 1-2 lines of unique context before and after changes.
+3. OUTPUT: Output ONLY patch blocks. No explanations, no markdown code blocks (\`\`\`).`;
 
         // --- V3.0 SANDBOX POLYFILL ENGINE ---
 const SANDBOX_POLYFILL = '<script>\n' +
@@ -214,6 +219,13 @@ const [selectedModel, setSelectedModel] = useState(safeStorage.getItem('differ_m
 const [showApiModal, setShowApiModal] = useState(false);
 const [showSupportModal, setShowSupportModal] = useState(false);
 const [showIndexMenu, setShowIndexMenu] = useState(false);
+            const [showGithubModal, setShowGithubModal] = useState(false);
+            const [githubConfig, setGithubConfig] = useState(() => {
+                const saved = safeStorage.getItem('differ_github_config');
+                return saved ? JSON.parse(saved) : { token: '', repo: '', desc: 'Created with Differ', private: true, url: '' };
+            });
+            const [isGithubSyncing, setIsGithubSyncing] = useState(false);
+            const [toasts, setToasts] = useState([]);
             const [consoleLogs, setConsoleLogs] = useState([]);
             const [showConsole, setShowConsole] = useState(false);
 const [externalWindow, setExternalWindow] = useState(null);
@@ -260,7 +272,12 @@ const [apiKeys, setApiKeys] = useState(() => {
             });
             const [aiSettings, setAiSettings] = useState(() => {
                 const saved = safeStorage.getItem('differ_ai_settings');
-                return saved ? JSON.parse(saved) : { temp: 0.1, maxTokens: 8192, context: 32768, syntaxHighlighting: true };
+                const defaults = { temp: 0.1, maxTokens: 8192, context: 32768, syntaxHighlighting: true, injectNotes: false, aiStrict: true };
+                if (saved) {
+                    const parsed = JSON.parse(saved);
+                    return { ...defaults, ...parsed };
+                }
+                return defaults;
             });
 
 // Refs
@@ -279,6 +296,7 @@ useEffect(() => { safeStorage.setItem('differ_source', source); }, [source]);
 useEffect(() => { safeStorage.setItem('differ_w_input', inputWidth); }, [inputWidth]);
             useEffect(() => { safeStorage.setItem('differ_w_result', resultWidth); }, [resultWidth]);
 useEffect(() => { safeStorage.setItem('differ_h_queue', queueHeight); }, [queueHeight]);
+            useEffect(() => { safeStorage.setItem('differ_github_config', JSON.stringify(githubConfig)); }, [githubConfig]);
 
             // --- FEATURE DETECTION ---
             useEffect(() => {
@@ -397,6 +415,10 @@ const logPatches = (appliedPatches) => {
 
             // --- WRAP SYNC ENGINE ---
             useEffect(() => {
+                const textarea = sourceRef.current;
+                if (textarea) {
+                    textarea.style.whiteSpace = wordWrap ? 'pre-wrap' : 'pre';
+                }
                 if (!wordWrap) return;
                 
                 const syncHeight = () => {
@@ -441,7 +463,7 @@ useEffect(() => {
             useEffect(() => {
                 const timerId = setTimeout(() => {
 const rawList = parseRawPatches(patchesRaw, parserMode);
-        const result = processPatches(source, rawList, disabledPatches, ignoreIndentation);
+        const result = processPatches(source, rawList, disabledPatches, ignoreIndentation, aiSettings.injectNotes);
         
         setParsedPatches(result.patches);
         setPreview(result.finalCode);
@@ -452,7 +474,7 @@ const rawList = parseRawPatches(patchesRaw, parserMode);
     }, 300);
 
     return () => clearTimeout(timerId);
-}, [source, patchesRaw, disabledPatches, ignoreIndentation, parserMode, patchLog]);
+}, [source, patchesRaw, disabledPatches, ignoreIndentation, parserMode, patchLog, aiSettings.injectNotes]);
 
             // --- V3.5: Variable-Fence Parsing (Deep-Inception Support) ---
 
@@ -579,7 +601,7 @@ const findBestMatch = (fullText, chunk, ignoreIndent = ignoreIndentation) => {
                 return ranges;
             };
 
-const processPatches = (srcCode, patchList, disabledSet) => {
+const processPatches = (srcCode, patchList, disabledSet, injectNotes = false) => {
                 const processed = [];
                 let modifiedCode = srcCode;
                 let matchedCount = 0;
@@ -613,6 +635,11 @@ const matchResult = findBestMatch(modifiedCode, p.search);
                             }
                         }
 
+                        if (injectNotes) {
+                            const note = `// [Differ: ${p.label || 'Patch'}]\n`;
+                            finalReplace = note + finalReplace;
+                        }
+
                         modifiedCode = pre + finalReplace + post;
                         info.status = 'success';
                         info.line = modifiedCode.substring(0, matchResult.start).split('\n').length;
@@ -641,6 +668,54 @@ const matchResult = findBestMatch(modifiedCode, p.search);
 
                 return { patches: processed, finalCode: modifiedCode, stats: { total: patchList.length, matched: matchedCount, failed: failedCount, applied: appliedCount } };
             };
+
+            // --- INDEXER ENGINE ---
+            const generateIndex = (code) => {
+                const lines = code.split('\n');
+                const index = [];
+                
+                // Regex for different types
+                const reDef = /(?:function\s+(\w+)|const\s+(\w+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[^=]+)\s*=>|class\s+(\w+))/g;
+                const reRegion = /\/\/\s*---\s*(.*?)\s*---/g;
+                const reEvent = /\.addEventListener\s*\(\s*['"]([^'"]+)['"]/g;
+                const reIIFE = /\(\s*(?:async\s*)?function\s*\(/g;
+
+                let match;
+                
+                // Scan for Definitions
+                while ((match = reDef.exec(code)) !== null) {
+                    const name = match[1] || match[2] || match[3];
+                    if (!name) continue;
+                    const line = code.substring(0, match.index).split('\n').length - 1;
+                    index.push({ type: 'defs', label: name, line, end: line, color: 'text-blue-400', icon: 'fa-cube' });
+                }
+
+                // Scan for Regions
+                while ((match = reRegion.exec(code)) !== null) {
+                    const label = match[1];
+                    const line = code.substring(0, match.index).split('\n').length - 1;
+                    index.push({ type: 'regions', label: label, line, end: line, color: 'text-amber-400', icon: 'fa-section' });
+                }
+
+                // Scan for Events
+                while ((match = reEvent.exec(code)) !== null) {
+                    const label = match[1];
+                    const line = code.substring(0, match.index).split('\n').length - 1;
+                    index.push({ type: 'events', label: `on('${label}')`, line, end: line, color: 'text-rose-400', icon: 'fa-bolt' });
+                }
+
+                // Scan for IIFEs
+                while ((match = reIIFE.exec(code)) !== null) {
+                    const line = code.substring(0, match.index).split('\n').length - 1;
+                    index.push({ type: 'iife', label: '(IIFE)', line, end: line, color: 'text-purple-400', icon: 'fa-rocket' });
+                }
+
+                return index.sort((a, b) => a.line - b.line);
+            };
+
+            useEffect(() => {
+                setCodeIndex(generateIndex(source));
+            }, [source]);
 
             // --- UI ACTIONS ---
             const togglePatch = (id) => {
@@ -1378,6 +1453,93 @@ const testLocalConnection = async () => {
                 finally { setIsSyncing(false); }
             };
 
+            const createGithubRepo = async () => {
+                if (!githubConfig.token || !githubConfig.repo) {
+                    alert("GitHub Token and Repo Name are required.");
+                    return;
+                }
+                setIsGithubSyncing(true);
+                try {
+                    const res = await fetch('https://api.github.com/user/repos', {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `token ${githubConfig.token}`,
+                            'Accept': 'application/vnd.github.v3+json',
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            name: githubConfig.repo,
+                            description: githubConfig.desc,
+                            private: githubConfig.private,
+                            auto_init: true
+                        })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.message || "Failed to create repo");
+                    
+                    setGithubConfig(prev => ({ ...prev, url: data.html_url }));
+                    alert("Repository created successfully!");
+                } catch (e) {
+                    alert("Error: " + e.message);
+                } finally {
+                    setIsGithubSyncing(false);
+                }
+            };
+
+            const syncToGithub = async () => {
+                if (!githubConfig.token || !githubConfig.repo || !githubConfig.url) {
+                    alert("GitHub integration not fully configured. Create or link a repo first.");
+                    return;
+                }
+                setIsGithubSyncing(true);
+                try {
+                    // 1. Get user info to get the login name
+                    const userRes = await fetch('https://api.github.com/user', {
+                        headers: { 'Authorization': `token ${githubConfig.token}` }
+                    });
+                    const userData = await userRes.json();
+                    const owner = userData.login;
+
+                    const fileName = currentFileName || 'index.html';
+                    const path = fileName.includes(':') ? fileName.split(':').pop().trim() : fileName;
+                    
+                    // 2. Get file SHA if it exists
+                    let sha;
+                    try {
+                        const fileRes = await fetch(`https://api.github.com/repos/${owner}/${githubConfig.repo}/contents/${path}`, {
+                            headers: { 'Authorization': `token ${githubConfig.token}` }
+                        });
+                        if (fileRes.ok) {
+                            const fileData = await fileRes.json();
+                            sha = fileData.sha;
+                        }
+                    } catch (e) {}
+
+                    // 3. Create or Update file
+                    const res = await fetch(`https://api.github.com/repos/${owner}/${githubConfig.repo}/contents/${path}`, {
+                        method: 'PUT',
+                        headers: {
+                            'Authorization': `token ${githubConfig.token}`,
+                            'Accept': 'application/vnd.github.v3+json',
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            message: `Sync from Differ: ${new Date().toISOString()}`,
+                            content: btoa(unescape(encodeURIComponent(source))),
+                            sha: sha
+                        })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.message || "Failed to sync file");
+                    
+                    alert(`Successfully synced ${path} to GitHub!`);
+                } catch (e) {
+                    alert("Sync Error: " + e.message);
+                } finally {
+                    setIsGithubSyncing(false);
+                }
+            };
+
             const generateAiPatch = async () => {
                 if (!aiPrompt.trim()) return;
                 setIsAiGenerating(true); setAiError(null);
@@ -1393,7 +1555,8 @@ const testLocalConnection = async () => {
                         // Code Mode: Generate patches based on Source + Blueprint
                         const contextPrefix = projectContext ? `PROJECT CONTEXT:\n${projectContext}\n\n` : "";
                         const planPrefix = blueprint.trim() !== '# Project Blueprint' ? `BLUEPRINT PLAN:\n${blueprint}\n\n` : "";
-                        const rawText = await callAI(`${contextPrefix}${planPrefix}CURRENT FILE (${currentFileName || 'unsaved'}):\n${source}\n\nTASK: ${aiPrompt}`, SYSTEM_PROMPT);
+                        const localReminder = (selectedProvider === 'local' && aiSettings.aiStrict) ? "\n\nCRITICAL: You MUST output ONLY valid patch blocks using <<<< SEARCH and ==== REPLACE >>>>. Do NOT output full files or markdown code blocks. Start your response immediately with <<<< SEARCH." : "";
+                        const rawText = await callAI(`${contextPrefix}${planPrefix}CURRENT FILE (${currentFileName || 'unsaved'}):\n${source}\n\nTASK: ${aiPrompt}${localReminder}`, SYSTEM_PROMPT);
                         
                         let cleanText = rawText.replace(/```.*?\n/g, '').replace(/```/g, '').trim();
                         cleanText = cleanText
@@ -1773,6 +1936,13 @@ return (
                                 >
                                     <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current"><path d="M12.65 10C11.83 7.67 9.61 6 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6c2.61 0 4.83-1.67 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>
                                 </button>
+                                <button 
+                                    onClick={() => setShowGithubModal(true)} 
+                                    className={`w-8 h-8 flex items-center justify-center rounded transition-all ${githubConfig.url ? 'text-emerald-400 hover:text-emerald-300' : 'text-slate-400 hover:text-white'} hover:bg-slate-800`} 
+                                    title="GitHub Integration"
+                                >
+                                    <i className="fa-brands fa-github text-sm"></i>
+                                </button>
                                 <button onClick={exportSession} className="w-8 h-8 flex items-center justify-center rounded text-slate-400 hover:text-white hover:bg-slate-800 transition-all" title="Save Session"><i className="fa-solid fa-floppy-disk text-xs"></i></button>
 <div className="relative">
                                     <button onClick={() => setShowLoadMenu(!showLoadMenu)} className="w-8 h-8 flex items-center justify-center rounded text-slate-400 hover:text-white hover:bg-slate-800 transition-all" title="Open..."><i className="fa-solid fa-folder-open text-xs"></i></button>
@@ -1813,6 +1983,16 @@ return (
                             
                             <button onClick={() => setParserMode(parserMode === 'smart' ? 'strict' : 'smart')} className={`w-8 h-8 flex items-center justify-center rounded text-[10px] font-bold border transition-all ${parserMode==='strict' ? 'bg-amber-900/30 border-amber-700 text-amber-500' : 'bg-transparent border-slate-800 text-slate-500'}`} title={parserMode === 'strict' ? "Parser: Strict (Requires >>>>)" : "Parser: Smart (Auto-Detect)"}>P</button>
                             <button onClick={() => setIgnoreIndentation(!ignoreIndentation)} className={`w-8 h-8 flex items-center justify-center rounded text-[10px] font-bold border transition-all ${!ignoreIndentation ? 'bg-purple-900/30 border-purple-700 text-purple-400' : 'bg-transparent border-slate-800 text-slate-500'}`} title={ignoreIndentation ? "Search: Relaxed (Ignores Indent)" : "Search: Exact (Strict Indent)"}>S</button>
+                            <button onClick={() => {
+                                const next = { ...aiSettings, injectNotes: !aiSettings.injectNotes };
+                                setAiSettings(next);
+                                safeStorage.setItem('differ_ai_settings', JSON.stringify(next));
+                            }} className={`w-8 h-8 flex items-center justify-center rounded text-[10px] font-bold border transition-all ${aiSettings.injectNotes ? 'bg-blue-900/30 border-blue-700 text-blue-400' : 'bg-transparent border-slate-800 text-slate-500'}`} title={aiSettings.injectNotes ? "Notes: ON (Injects unique IDs)" : "Notes: OFF"}>N</button>
+                            <button onClick={() => {
+                                const next = { ...aiSettings, aiStrict: !aiSettings.aiStrict };
+                                setAiSettings(next);
+                                safeStorage.setItem('differ_ai_settings', JSON.stringify(next));
+                            }} className={`w-8 h-8 flex items-center justify-center rounded text-[10px] font-bold border transition-all ${aiSettings.aiStrict ? 'bg-rose-900/30 border-rose-700 text-rose-400' : 'bg-transparent border-slate-800 text-slate-500'}`} title={aiSettings.aiStrict ? "AI: Strict (Forced Patch Format)" : "AI: Relaxed"}>A</button>
                             
                             <div className="w-px h-6 bg-slate-800 mx-2"></div>
                             <button onClick={applyAll} disabled={stats.matched === 0} className={`h-8 px-3 rounded font-bold text-xs uppercase tracking-widest transition-all flex items-center justify-center ${stats.matched > 0 ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-900/20' : 'bg-slate-800 text-slate-600 cursor-not-allowed'}`} title="Apply All Patches">
@@ -2143,6 +2323,14 @@ onClick={() => {
                                                             Sync {contextSelection.size} Files 
                                                             {projectContext && <span className="opacity-60 ml-1 font-normal normal-case">({Math.ceil(projectContext.length / 4)} toks)</span>}
                                                         </button>
+                                                        <button 
+                                                            onClick={syncToGithub}
+                                                            disabled={isGithubSyncing || !githubConfig.url}
+                                                            className="mx-2 mb-2 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded text-[10px] font-bold uppercase transition-colors flex items-center justify-center gap-2"
+                                                        >
+                                                            {isGithubSyncing ? <i className="fa-solid fa-circle-notch fa-spin"></i> : <i className="fa-brands fa-github"></i>}
+                                                            {isGithubSyncing ? 'Syncing...' : 'Sync to GitHub'}
+                                                        </button>
                                                     </div>
                                                 )}
                                             </div>
@@ -2305,6 +2493,12 @@ onClick={() => {
                                                             if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
                                                                 e.stopPropagation();
                                                             }
+                                                            if (e.shiftKey && (e.ctrlKey || e.metaKey)) {
+                                                                const val = e.target.value;
+                                                                const startLine = val.substring(0, e.target.selectionStart).split('\n').length - 1;
+                                                                const endLine = val.substring(0, e.target.selectionEnd).split('\n').length - 1;
+                                                                setActiveHighlight({ start: startLine, end: endLine });
+                                                            }
                                                         }}
                                                         className={`absolute inset-0 w-full h-full bg-transparent p-4 focus:outline-none resize-none z-10 editor-font ${wordWrap ? 'whitespace-pre-wrap' : 'whitespace-pre'} ${aiSettings.syntaxHighlighting && !wordWrap ? 'text-transparent caret-white' : 'text-slate-300'}`}
                                                         spellCheck="false"
@@ -2322,20 +2516,20 @@ onClick={() => {
                         <div onMouseDown={() => setIsResizingR(true)} className="w-1 cursor-col-resize hover:bg-blue-500/50 z-50 transition-colors"></div>
 
 <div className="flex flex-col bg-[#0b1221]" style={{ width: resultWidth }}>
-                            <div className="h-8 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-3 overflow-hidden shrink-0">
-                                <span className="text-[10px] font-bold uppercase tracking-widest text-blue-500 flex items-center gap-2">
-                                    <i className="fa-solid fa-window-restore"></i>
-                                    {resultWidth > 200 && <span>RESULT</span>}
-                                </span>
-                                <div className="flex gap-2 items-center">
-                                    <button 
-                                        onClick={popOutResult} 
-                                        className={`text-[10px] transition-colors ${externalWindow && !externalWindow.closed ? 'text-blue-400' : 'text-slate-500 hover:text-white'}`} 
-                                        title="Detach Result Window"
-                                    >
-                                        <i className="fa-solid fa-up-right-from-square"></i>
-                                        {resultWidth > 420 && <span className="ml-1 uppercase text-[9px] font-bold">Detach</span>}
-                                    </button>
+<div className="h-8 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-3 overflow-hidden shrink-0">
+<span className="text-[10px] font-bold uppercase tracking-widest text-blue-500 flex items-center gap-2">
+                                        <i className="fa-solid fa-window-restore"></i>
+                                        {resultWidth > 200 && <span>RESULT</span>}
+                                    </span>
+<div className="flex gap-2 items-center">
+                                        <button 
+                                            onClick={popOutResult} 
+                                            className={`text-[10px] transition-colors ${externalWindow && !externalWindow.closed ? 'text-blue-400' : 'text-slate-500 hover:text-white'}`} 
+                                            title="Detach Result Window"
+                                        >
+                                            <i className="fa-solid fa-up-right-from-square"></i>
+                                            {resultWidth > 420 && <span className="ml-1 uppercase text-[9px] font-bold">Detach</span>}
+                                        </button>
                                     
                                     <div className="w-px h-3 bg-slate-800 mx-1"></div>
                                     
@@ -2348,7 +2542,7 @@ onClick={() => {
                                         {resultWidth > 280 && <span className="ml-1">LOGS</span>}
                                     </button>
                                     
-                                    <button 
+<button 
                                         onClick={() => setRenderMode(m => m === 'live' ? 'committed' : m === 'committed' ? 'code' : 'live')} 
                                         className={`px-2 py-0.5 rounded text-[9px] font-bold transition-colors ${
                                             renderMode === 'live' ? 'bg-emerald-600 text-white' : 
@@ -2361,7 +2555,7 @@ onClick={() => {
                                         {resultWidth > 320 && <span className="ml-1 uppercase">{renderMode === 'committed' ? 'SRC' : renderMode}</span>}
                                     </button>
 
-                                    <button onClick={downloadResult} className="text-[10px] text-emerald-500 hover:text-white ml-2" title="Download .html"><i className="fa-solid fa-download"></i>{resultWidth > 380 && <span className="ml-1">SAVE</span>}</button>
+<button onClick={downloadResult} className="text-[10px] text-emerald-500 hover:text-white ml-2" title="Download .html"><i className="fa-solid fa-download"></i>{resultWidth > 380 && <span className="ml-1">SAVE</span>}</button>
                                     <button onClick={() => navigator.clipboard.writeText(preview)} className="text-[10px] text-blue-500 hover:text-white ml-2" title="Copy to Clipboard"><i className="fa-regular fa-copy"></i>{resultWidth > 380 && <span className="ml-1">COPY</span>}</button>
                                 </div>
                             </div>
@@ -2375,7 +2569,7 @@ onClick={() => {
                                             <button onClick={() => { externalWindow.close(); setExternalWindow(null); }} className="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded text-[10px] font-bold transition-colors uppercase tracking-wider">Re-Attach</button>
                                         </div>
                                     ) : showRender ? (
-                                        <iframe ref={iframeRef} className="preview-frame" sandbox="allow-scripts allow-same-origin allow-modals allow-downloads allow-forms allow-popups"></iframe>
+                                        <iframe ref={iframeRef} className="preview-frame" sandbox="allow-scripts allow-same-origin allow-modals allow-downloads allow-forms allow-popups allow-orientation-lock allow-pointer-lock"></iframe>
 ) : (
                                         <div className="h-full overflow-auto p-4 text-slate-400 editor-font whitespace-pre">{preview}</div>
                                     )}
