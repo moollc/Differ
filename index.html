@@ -260,7 +260,7 @@ const [apiKeys, setApiKeys] = useState(() => {
             });
             const [aiSettings, setAiSettings] = useState(() => {
                 const saved = safeStorage.getItem('differ_ai_settings');
-                return saved ? JSON.parse(saved) : { temp: 0.1, maxTokens: 8192, context: 32768 };
+                return saved ? JSON.parse(saved) : { temp: 0.1, maxTokens: 8192, context: 32768, syntaxHighlighting: true };
             });
 
 // Refs
@@ -874,13 +874,50 @@ const handleScroll = useCallback((e) => {
             }, [visualHighlights.length, highlightsMap, activeHoverMatch]);
 
             // V2.9: Virtualized Highlights (Reduces 10k nodes to just active highlights)
+            const highlightCode = (code) => {
+                if (!code) return "";
+                // Escape HTML
+                let html = code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                
+                // Keywords
+                html = html.replace(/\b(const|let|var|function|return|if|else|for|while|import|export|from|class|extends|new|this|await|async|try|catch|finally|throw|typeof|instanceof|switch|case|default|break|continue|yield|delete|in|of)\b/g, '<span class="text-purple-400 font-bold">$1</span>');
+                
+                // Strings
+                html = html.replace(/(["'`])((?:\\.|[^\1])*?)\1/g, '<span class="text-emerald-400">$1$2$1</span>');
+                
+                // Comments
+                html = html.replace(/(\/\/.*$)/gm, '<span class="text-slate-500 italic">$1</span>');
+                html = html.replace(/(\/\*[\s\S]*?\*\/)/gm, '<span class="text-slate-500 italic">$1</span>');
+                
+                // Numbers
+                html = html.replace(/\b(\d+)\b/g, '<span class="text-amber-400">$1</span>');
+                
+                // Functions
+                html = html.replace(/\b(\w+)(?=\s*\()/g, '<span class="text-blue-400">$1</span>');
+
+                // HTML Tags
+                html = html.replace(/(&lt;\/?[a-z1-6]+.*?&gt;)/gi, '<span class="text-rose-400">$1</span>');
+
+                return html;
+            };
+
             const renderHighlights = () => {
                 const lineHeight = 20;
-                return visualHighlights.map((match, i) => {
+                const patches = visualHighlights.map((match, i) => {
                     const topPos = match.start * lineHeight;
                     const h = (match.end - match.start + 1) * lineHeight;
                     return <div key={i} className="absolute left-0 right-0 mx-4 highlight-match strikethrough pointer-events-none" style={{ top: `${topPos}px`, height: `${h}px` }}></div>;
                 });
+
+                if (aiSettings.syntaxHighlighting && !wordWrap) {
+                    return (
+                        <React.Fragment>
+                            {patches}
+                            <div className="relative z-10" dangerouslySetInnerHTML={{ __html: highlightedHtml }}></div>
+                        </React.Fragment>
+                    );
+                }
+                return patches;
             };
 
             const renderMiniMap = () => {
@@ -905,6 +942,11 @@ const handleScroll = useCallback((e) => {
                     <div key={i} style={{ height: wordWrap ? (lineHeights[i] || 20) : 20 }} className="leading-5">{i + 1}</div>
                 ));
             }, [source, wordWrap, lineHeights]);
+
+            const highlightedHtml = useMemo(() => {
+                if (!aiSettings.syntaxHighlighting || wordWrap) return "";
+                return highlightCode(source);
+            }, [source, aiSettings.syntaxHighlighting, wordWrap]);
 
             // PERFORMANCE: Memoize Diff Calculation (Prevent re-calc on UI interaction)
             const diffElements = useMemo(() => {
@@ -1025,20 +1067,34 @@ const fetchModels = async () => {
                         // Strategy 1: LM Studio / OpenAI V1 (/v1/models)
                         const v1Url = baseUrl.endsWith('/v1') ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
                         const v1Data = await tryFetch(v1Url, { headers: { 'Authorization': 'Bearer lm-studio' } });
-                        if (v1Data && v1Data.data) {
-                            const models = v1Data.data.map(m => m.id);
-                            setAvailableModels(models);
-                            if (!models.includes(selectedModel)) setSelectedModel(models[0]);
-                            return;
+                        if (v1Data) {
+                            const rawList = Array.isArray(v1Data) ? v1Data : (v1Data.data || []);
+                            // Filter out embedding models which can't chat
+                            const modelsList = rawList.filter(m => {
+                                const id = (m.id || m.name || "").toLowerCase();
+                                return !id.includes('embed') && !id.includes('nomic');
+                            });
+
+                            if (modelsList.length > 0) {
+                                const models = modelsList.map(m => m.id || m.name);
+                                setAvailableModels(models);
+                                if (!models.includes(selectedModel)) setSelectedModel(models[0]);
+                                return;
+                            }
                         }
 
                         // Strategy 2: Ollama Native (/api/tags)
                         const nativeBase = baseUrl.replace(/\/v1$/, '');
                         const nativeData = await tryFetch(`${nativeBase}/api/tags`);
                         if (nativeData && nativeData.models) {
-                            const models = nativeData.models.map(m => m.name);
+                            const models = nativeData.models
+                                .map(m => m.name)
+                                .filter(id => {
+                                    const lower = id.toLowerCase();
+                                    return !lower.includes('embed') && !lower.includes('nomic');
+                                });
                             setAvailableModels(models);
-                            if (!models.includes(selectedModel)) setSelectedModel(models[0]);
+                            if (models.length > 0 && !models.includes(selectedModel)) setSelectedModel(models[0]);
                             return;
                         }
 
@@ -1115,6 +1171,7 @@ const fetchModels = async () => {
                         url = `${baseUrl}/api/chat`; // Ollama default port
                     } else {
                         url = baseUrl.endsWith('/v1') ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`; // Default to OpenAI compat
+                        headers['Authorization'] = 'Bearer lm-studio'; // LM Studio often expects this even if dummy
                     }
                 } else {
                     url = selectedProvider === 'xai' ? 'https://api.x.ai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
@@ -1122,25 +1179,25 @@ const fetchModels = async () => {
                 }
                 body = { 
                     model: selectedModel || (selectedProvider === 'openai' ? 'gpt-4o' : selectedProvider === 'xai' ? 'grok-beta' : 'local-model'),
-                    messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }],
-                    temperature: aiSettings.temp,
+                    messages: [
+                        { role: 'system', content: system || "You are a helpful assistant." },
+                        { role: 'user', content: prompt }
+                    ],
+                    temperature: aiSettings.temp ?? 0.7,
                     stream: false
                 };
                 
                 if (selectedProvider === 'local') {
-                    // Anti-hallucination stop sequences for local models
-                    body.stop = ["<|endoftext|>", ">>>>", "\n\n\n"]; 
-                    
+                    // Minimal body for local models to avoid "Bad Request" on strict servers
                     if (url.includes('/v1/')) {
-                        // LM Studio REST Requirements
-                        body.max_tokens = aiSettings.maxTokens;
-                        body.frequency_penalty = 0.0;
-                        body.presence_penalty = 0.0;
+                        // Some servers prefer max_tokens, others max_completion_tokens
+                        // We'll use a safer default if not set
+                        body.max_tokens = aiSettings.maxTokens || 4096;
                     } else {
                         // Ollama Native Fallback
                         body.options = { 
-                            num_ctx: aiSettings.context, 
-                            num_predict: aiSettings.maxTokens, 
+                            num_ctx: aiSettings.context || 32768, 
+                            num_predict: aiSettings.maxTokens || 4096, 
                             temperature: aiSettings.temp,
                             top_k: 40,
                             top_p: 0.9
@@ -1163,10 +1220,21 @@ const fetchModels = async () => {
             setAiStartTime(performance.now());
                 try {
                     const tStart = performance.now();
+                    console.log(`[Differ] Calling AI (${selectedProvider}):`, { url, body });
                     const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-const result = await response.json();
+                    const result = await response.json();
                     
-if (!response.ok) throw new Error(`API Error: ${result.error?.message || response.statusText}`);
+                    if (!response.ok) {
+                        console.error("[Differ] AI API Error Response:", result);
+                        let errorMsg = result.error?.message || result.error || result.message || (typeof result === 'string' ? result : JSON.stringify(result)) || response.statusText;
+                        
+                        // Specific handling for context window errors (common in LM Studio)
+                        if (errorMsg.toLowerCase().includes('context size') || errorMsg.toLowerCase().includes('n_ctx')) {
+                            errorMsg += "\n\nTIP: Your prompt is too large for the model's current context window. In LM Studio, go to the 'Load Model' settings and increase 'Context Overflow Policy' or 'n_ctx'. Alternatively, reduce the number of files selected in the 'Sync Context' menu.";
+                        }
+                        
+                        throw new Error(`API Error (${response.status}): ${errorMsg}`);
+                    }
                     
 let output;
                     if (selectedProvider === 'gemini') output = result.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -1235,10 +1303,33 @@ const testLocalConnection = async () => {
                     // Try OpenAI Compat if Native failed
                     if (!success) {
                         const v1Url = baseUrl.endsWith('/v1') ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
-                        const res2 = await fetch(v1Url, { method: 'GET', mode: 'cors' });
+                        const res2 = await fetch(v1Url, { 
+                            method: 'GET', 
+                            mode: 'cors',
+                            headers: { 'Authorization': 'Bearer lm-studio' }
+                        });
                         if (res2.ok) {
                             const data2 = await res2.json();
-                            count = data2.data ? data2.data.length : 0;
+                            // Handle both {data: []} (OpenAI) and [] (some local providers)
+                            const rawList = Array.isArray(data2) ? data2 : (data2.data || []);
+                            
+                            // Filter out embedding models and non-objects
+                            const processedModels = rawList
+                                .map(m => typeof m === 'string' ? m : (m.id || m.name))
+                                .filter(id => {
+                                    if (!id) return false;
+                                    const lower = id.toLowerCase();
+                                    return !lower.includes('embed') && !lower.includes('nomic');
+                                });
+
+                            count = processedModels.length;
+                            
+                            // If we found models, populate the dropdown immediately to be helpful
+                            if (count > 0) {
+                                setAvailableModels(processedModels);
+                                if (!processedModels.includes(selectedModel)) setSelectedModel(processedModels[0]);
+                            }
+                            
                             success = true;
                         } else {
                             throw new Error(`HTTP ${res2.status}`);
@@ -1546,7 +1637,8 @@ return (
                                                                     1. Close Ollama from System Tray completely.<br/>
                                                                     2. Run: <code className="text-amber-400">$env:OLLAMA_ORIGINS="*"; ollama serve</code><br/>
                                                                     3. Open <code className="text-blue-400">chrome://flags/#block-insecure-private-network-requests</code> and set to <span className="font-bold text-white">Disabled</span>.<br/>
-                                                                    4. <span className="text-orange-400 font-bold">Brave:</span> Turn off Shields for this site.
+                                                                    4. <span className="text-orange-400 font-bold">Brave:</span> Turn off Shields for this site.<br/>
+                                                                    5. <span className="text-purple-400 font-bold">LM Studio:</span> Turn off "Truncate Middle" and enable "Rolling Context" for large files.
                                                                 </div>
                                                             )}
                                                         </div>
@@ -1630,6 +1722,23 @@ return (
                                             }}
                                             className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-1.5 text-xs text-blue-300 font-mono"
                                         />
+                                    </div>
+
+                                    <div className="flex items-center justify-between p-2 bg-slate-900/50 rounded border border-slate-800">
+                                        <div className="flex flex-col">
+                                            <span className="text-[10px] font-bold text-slate-300 uppercase">Syntax Highlighting</span>
+                                            <span className="text-[8px] text-slate-500">Colorize code (Non-wrap mode only)</span>
+                                        </div>
+                                        <button 
+                                            onClick={() => {
+                                                const next = { ...aiSettings, syntaxHighlighting: !aiSettings.syntaxHighlighting };
+                                                setAiSettings(next);
+                                                safeStorage.setItem('differ_ai_settings', JSON.stringify(next));
+                                            }}
+                                            className={`w-8 h-4 rounded-full transition-colors relative ${aiSettings.syntaxHighlighting ? 'bg-emerald-600' : 'bg-slate-700'}`}
+                                        >
+                                            <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-all ${aiSettings.syntaxHighlighting ? 'left-4.5' : 'left-0.5'}`}></div>
+                                        </button>
                                     </div>
                                 </div>
                                 
@@ -2175,7 +2284,7 @@ onClick={() => {
                                                 <div className="flex-1 relative overflow-hidden">
                                                     <div ref={measureRef} className="absolute top-0 left-0 p-4 -z-50 opacity-0 pointer-events-none editor-font whitespace-pre-wrap break-words" style={{ visibility: 'hidden' }}></div>
                                                     
-                                                    <div ref={backdropRef} className={`absolute inset-0 p-4 pointer-events-none editor-font text-transparent opacity-100 z-0 ${wordWrap ? 'hidden' : ''}`}>
+                                                    <div ref={backdropRef} className={`absolute inset-0 p-4 pointer-events-none editor-font opacity-100 z-0 ${wordWrap ? 'hidden' : ''} ${aiSettings.syntaxHighlighting ? 'text-slate-300' : 'text-transparent'}`}>
                                                         {renderHighlights()}
                                                         {activeHighlight && !wordWrap && (
                                                             <div 
@@ -2197,7 +2306,7 @@ onClick={() => {
                                                                 e.stopPropagation();
                                                             }
                                                         }}
-                                                        className={`absolute inset-0 w-full h-full bg-transparent p-4 text-slate-300 focus:outline-none resize-none z-10 editor-font ${wordWrap ? 'whitespace-pre-wrap' : 'whitespace-pre'}`}
+                                                        className={`absolute inset-0 w-full h-full bg-transparent p-4 focus:outline-none resize-none z-10 editor-font ${wordWrap ? 'whitespace-pre-wrap' : 'whitespace-pre'} ${aiSettings.syntaxHighlighting && !wordWrap ? 'text-transparent caret-white' : 'text-slate-300'}`}
                                                         spellCheck="false"
                                                     ></textarea>
                                                 </div>
