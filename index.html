@@ -4,10 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Differ V3.1 | History & Audit</title>
-    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
     <!-- Updated to Babel 7 (standalone) to support React Fragments and modern syntax -->
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
     <script src="https://unpkg.com/diff@5.1.0/dist/diff.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
@@ -44,10 +44,15 @@
     </style>
 </head>
 <body>
-    <div id="root"></div>
+<div id="root"></div>
 
-    <script type="text/babel">
-        const { useState, useEffect, useRef, useMemo } = React;
+<script type="module">
+    // Inject environment variables from Vite build
+    try { window.ENV_GEMINI_API_KEY = process.env.GEMINI_API_KEY; } catch(e) {}
+</script>
+
+<script type="text/babel">
+        const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
         // --- SAFE STORAGE WRAPPER (Self-Render Support) ---
         const safeStorage = {
@@ -62,9 +67,8 @@
         const DEMO_SOURCE = `<!DOCTYPE html>
 <html>
 <body style="background: #111; color: #eee; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh;">
-    <div id="app">
-        <h1>System Offline</h1>
-        <button id="btn">Retry</button>
+<div id="app" class="container">
+        <h1>Welcome Back</h1>
     </div>
     <script>
         document.getElementById('btn').onclick = () => alert('Connecting...');
@@ -202,10 +206,7 @@ const [showDiff, setShowDiff] = useState(false);
 const [isResizingV, setIsResizingV] = useState(false);
 const [isAiGenerating, setIsAiGenerating] = useState(false);
             const [aiError, setAiError] = useState(null);
-const [isFixingPatch, setIsFixingPatch] = useState(null);
-            const [localTestStatus, setLocalTestStatus] = useState(null);
-            const [aiThought, setAiThought] = useState("");
-            const [showThought, setShowThought] = useState(false);
+            const [aiStartTime, setAiStartTime] = useState(null);
             const [aiPrompt, setAiPrompt] = useState("");
             const [selectedProvider, setSelectedProvider] = useState(safeStorage.getItem('differ_provider') || 'gemini');
             const [availableModels, setAvailableModels] = useState([]);
@@ -226,8 +227,12 @@ const [currentFileName, setCurrentFileName] = useState(null);
 const [projectContext, setProjectContext] = useState("");
             const [isSyncing, setIsSyncing] = useState(false);
             const [showFileMenu, setShowFileMenu] = useState(false);
-            const [showSyncMenu, setShowSyncMenu] = useState(false);
+const [showSyncMenu, setShowSyncMenu] = useState(false);
             const [contextSelection, setContextSelection] = useState(new Set());
+            const [aiThought, setAiThought] = useState("");
+            const [showThought, setShowThought] = useState(true);
+            const [isFixingPatch, setIsFixingPatch] = useState(null);
+            const [localTestStatus, setLocalTestStatus] = useState(null);
 
             // Reset context when folder changes
             useEffect(() => {
@@ -243,14 +248,22 @@ const [projectContext, setProjectContext] = useState("");
             const [indexFilters, setIndexFilters] = useState({ defs: true, regions: true, events: true, iife: true });
 const [apiKeys, setApiKeys] = useState(() => {
                 const saved = safeStorage.getItem('differ_api_keys');
-                return saved ? JSON.parse(saved) : { gemini: '', openai: '', xai: '', claude: '', local: 'http://127.0.0.1:11434/v1' };
+                // Use injected global or empty string
+                const envKey = window.ENV_GEMINI_API_KEY || '';
+                const defaults = { gemini: envKey, openai: '', xai: '', claude: '', local: 'http://127.0.0.1:11434/v1' };
+                if (saved) {
+                    const parsed = JSON.parse(saved);
+                    if (!parsed.gemini && defaults.gemini) parsed.gemini = defaults.gemini;
+                    return parsed;
+                }
+                return defaults;
             });
             const [aiSettings, setAiSettings] = useState(() => {
                 const saved = safeStorage.getItem('differ_ai_settings');
                 return saved ? JSON.parse(saved) : { temp: 0.1, maxTokens: 8192, context: 32768 };
             });
 
-            // Refs
+// Refs
             const sourceRef = useRef(null);
             const savedContentRef = useRef(null); // For Auto-Save tracking
             const backdropRef = useRef(null);
@@ -846,17 +859,19 @@ const handleMountFolder = async () => {
                 return map;
             }, [visualHighlights]);
 
-            const handleScroll = (e) => {
+const handleScroll = useCallback((e) => {
                 const top = e.target.scrollTop;
-                if (backdropRef.current) backdropRef.current.scrollTop = top;
-                if (gutterRef.current) gutterRef.current.scrollTop = top;
-                
-                if (visualHighlights.length > 0) {
-                    const visibleLine = Math.floor(top / 20);
-                    const match = highlightsMap.get(visibleLine) || null;
-                    if (match !== activeHoverMatch) setActiveHoverMatch(match);
-                }
-            };
+                requestAnimationFrame(() => {
+                    if (backdropRef.current) backdropRef.current.scrollTop = top;
+                    if (gutterRef.current) gutterRef.current.scrollTop = top;
+                    
+                    if (visualHighlights.length > 0) {
+                        const visibleLine = Math.floor(top / 20);
+                        const match = highlightsMap.get(visibleLine) || null;
+                        if (match !== activeHoverMatch) setActiveHoverMatch(match);
+                    }
+                });
+            }, [visualHighlights.length, highlightsMap, activeHoverMatch]);
 
             // V2.9: Virtualized Highlights (Reduces 10k nodes to just active highlights)
             const renderHighlights = () => {
@@ -982,53 +997,67 @@ const fetchModels = async () => {
                         return;
                     }
 
-// OpenAI / xAI / Local (Ollama)
+                    // OpenAI / xAI / Local (Ollama)
                     let url, headers = { 'Content-Type': 'application/json' };
                     
-if (selectedProvider === 'local') {
-                        // OLLAMA ROBUST FETCH STRATEGY
-                        let rawKey = key || 'http://127.0.0.1:11434';
-                        if (!/^https?:\/\//i.test(rawKey)) rawKey = 'http://' + rawKey; // Ensure protocol
+                    if (selectedProvider === 'local') {
+                        // ROBUST LOCAL FETCH STRATEGY (Ollama & LM Studio)
+                        let rawKey = key || 'http://127.0.0.1:1234'; // Default to LM Studio port
+                        if (!/^https?:\/\//i.test(rawKey)) rawKey = 'http://' + rawKey;
                         let baseUrl = rawKey.replace(/\/+$/, '').replace('localhost', '127.0.0.1');
                         
-                        // Strategy 1: Try Native Endpoint (/api/tags) - Prioritized for reliability
-                        try {
-                            const nativeBase = baseUrl.replace(/\/v1$/, ''); 
-                            const nativeUrl = `${nativeBase}/api/tags`;
-                            const res = await fetch(nativeUrl); // Omit headers on GET for CORS
-                            if (res.ok) {
-                                const data = await res.json();
-                                if (data.models) {
-                                    const models = data.models.map(m => m.name);
-                                    setAvailableModels(models);
-                                    if (!models.includes(selectedModel)) setSelectedModel(models[0]);
-                                    return;
-                                }
-                            }
-                        } catch (err) { console.log("Ollama /api/tags failed, trying v1...", err); }
+                        // Mixed Content Check
+                        if (window.location.protocol === 'https:' && baseUrl.startsWith('http:')) {
+                            console.warn("[Differ] Mixed Content Warning: Browser will likely block HTTP requests to " + baseUrl + " from an HTTPS origin.");
+                        }
 
-                        // Strategy 2: Try OpenAI-Compatible Endpoint (/v1/models)
-                        try {
-                            const v1Url = baseUrl.endsWith('/v1') ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
-                            const res = await fetch(v1Url); // Omit headers on GET for CORS
-                            if (res.ok) {
-                                const data = await res.json();
-                                if (data.data && data.data.length > 0) {
-                                    const models = data.data.map(m => m.id);
-                                    setAvailableModels(models);
-                                    if (!models.includes(selectedModel)) setSelectedModel(models[0]);
-                                    return;
-                                }
+                        const tryFetch = async (url, options = {}) => {
+                            try {
+                                const res = await fetch(url, { ...options, mode: 'cors' });
+                                if (res.ok) return await res.json();
+                            } catch (e) { 
+                                console.warn(`[Differ] Fetch failed for ${url}. This is usually due to CORS (enable CORS in LM Studio/Ollama) or Mixed Content (HTTPS trying to access HTTP network IP).`, e);
+                                return null; 
                             }
-                        } catch (err) { console.error("Ollama /v1/models failed.", err); }
+                            return null;
+                        };
+
+                        // Strategy 1: LM Studio / OpenAI V1 (/v1/models)
+                        const v1Url = baseUrl.endsWith('/v1') ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
+                        const v1Data = await tryFetch(v1Url, { headers: { 'Authorization': 'Bearer lm-studio' } });
+                        if (v1Data && v1Data.data) {
+                            const models = v1Data.data.map(m => m.id);
+                            setAvailableModels(models);
+                            if (!models.includes(selectedModel)) setSelectedModel(models[0]);
+                            return;
+                        }
+
+                        // Strategy 2: Ollama Native (/api/tags)
+                        const nativeBase = baseUrl.replace(/\/v1$/, '');
+                        const nativeData = await tryFetch(`${nativeBase}/api/tags`);
+                        if (nativeData && nativeData.models) {
+                            const models = nativeData.models.map(m => m.name);
+                            setAvailableModels(models);
+                            if (!models.includes(selectedModel)) setSelectedModel(models[0]);
+                            return;
+                        }
+
+                        // Strategy 3: Try common ports if default failed
+                        if (!key) {
+                            const otherPort = baseUrl.includes('1234') ? 'http://127.0.0.1:11434' : 'http://127.0.0.1:1234';
+                            const altData = await tryFetch(`${otherPort}/v1/models`) || await tryFetch(`${otherPort}/api/tags`);
+                            if (altData) {
+                                const models = (altData.data || altData.models).map(m => m.id || m.name);
+                                setAvailableModels(models);
+                                if (!models.includes(selectedModel)) setSelectedModel(models[0]);
+                                return;
+                            }
+                        }
                         
-                        // If both fail
+                        console.warn("[Differ] Local model fetch failed. Ensure LM Studio/Ollama is running, CORS is enabled, and it's bound to 0.0.0.0 if on a network. If Differ is on HTTPS, you cannot connect to an HTTP network IP due to Mixed Content rules.");
                         setAvailableModels([]);
                         return;
-                    } 
-                    
-                    // Cloud Providers
-                    else if (selectedProvider === 'openai') {
+                    } else if (selectedProvider === 'openai') {
                         url = 'https://api.openai.com/v1/models';
                         headers['Authorization'] = `Bearer ${key}`;
                     } else if (selectedProvider === 'xai') {
@@ -1052,139 +1081,86 @@ if (selectedProvider === 'local') {
                 }
             };
 
-useEffect(() => { fetchModels(); }, [selectedProvider, apiKeys]);
+        useEffect(() => { fetchModels(); }, [selectedProvider, apiKeys]);
 
-// --- CODE INDEXER ENGINE ---
-            useEffect(() => {
-                const t = setTimeout(() => {
-                    const lines = source.split('\n');
-                    const index = [];
+        const callAI = async (prompt, system) => {
+            let key = apiKeys[selectedProvider];
+            
+            // Allow empty key for local (fallback to default)
+            if (!key && selectedProvider === 'local') {
+                key = 'http://127.0.0.1:11434';
+            }
+            if (!key) throw new Error(`No API key found for ${selectedProvider}`);
+
+            let url, body, headers = { 'Content-Type': 'application/json' };
+
+            if (selectedProvider === 'gemini') {
+                const model = selectedModel || 'gemini-2.0-flash';
+                url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+                body = { 
+                    contents: [{ parts: [{ text: prompt }] }], 
+                    systemInstruction: { parts: [{ text: system }] },
+                    generationConfig: {
+                        temperature: aiSettings.temp,
+                        maxOutputTokens: aiSettings.maxTokens
+                    }
+                };
+            } else if (['openai', 'xai', 'local'].includes(selectedProvider)) {
+                if (selectedProvider === 'local') {
+                    if (!/^https?:\/\//i.test(key)) key = 'http://' + key;
+                    const baseUrl = key.replace(/\/+$/, '').replace('localhost', '127.0.0.1');
                     
-                    // Helper to find block end by counting braces
-                    const findBlockEnd = (startLine) => {
-                        let open = 0;
-                        let started = false;
-                        for (let j = startLine; j < lines.length; j++) {
-                            const l = lines[j];
-                            const o = (l.match(/\{/g) || []).length;
-                            const c = (l.match(/\}/g) || []).length;
-                            if (o > 0) started = true;
-                            open += o;
-                            open -= c;
-                            if (started && open <= 0) return j;
-                        }
-                        return startLine; // Fallback
-                    };
-
-                    lines.forEach((line, i) => {
-                        const trim = line.trim();
-                        if (!trim) return;
-                        
-                        let item = null;
-                        
-                        // Regions / Markers
-                        if (/\/\/\s*(?:---|#region|TODO|FIXME)/i.test(trim)) {
-                            item = { line: i, end: i, type: 'regions', label: trim.replace(/^\/\/\s*/, '').substring(0, 30), icon: 'fa-bookmark', color: 'text-amber-500' };
-                        }
-                        // Function / Class Definitions
-                        else if (/(?:function\s+(\w+)|class\s+(\w+)|const\s+(\w+)\s*=\s*(?:async\s*)?(?:function|\([^)]*\)|[^\s=>]+)\s*=>)/.test(trim)) {
-                            const defMatch = trim.match(/(?:function\s+(\w+)|class\s+(\w+)|const\s+(\w+)\s*=\s*(?:async\s*)?(?:function|\([^)]*\)|[^\s=>]+)\s*=>)/);
-                            if (defMatch) {
-                                item = { line: i, end: findBlockEnd(i), type: 'defs', label: defMatch[1] || defMatch[2] || defMatch[3], icon: 'fa-cube', color: 'text-blue-400' };
-                            }
-                        }
-                        // IIFE
-                        else if (/^\(\s*(?:async\s*)?function/.test(trim) || /^\(\s*(?:async\s*)?\(\)\s*=>/.test(trim)) {
-                            item = { line: i, end: findBlockEnd(i), type: 'iife', label: '(IIFE)', icon: 'fa-bolt', color: 'text-purple-400' };
-                        }
-                        // Events
-                        else if (/\.addEventListener\(/.test(trim) || /\.on\w+\s*=/.test(trim)) {
-                            const evt = trim.match(/["']([^"']+)["']/) || [null, 'event'];
-                            const end = trim.includes('{') ? findBlockEnd(i) : i;
-                            item = { line: i, end: end, type: 'events', label: `on(${evt[1]})`, icon: 'fa-satellite-dish', color: 'text-rose-400' };
-                        }
-                        
-                        if (item) index.push(item);
-                    });
-                    setCodeIndex(index);
-                }, 600);
-                return () => clearTimeout(t);
-            }, [source]);
-
-const callAI = async (prompt, system) => {
-                let key = apiKeys[selectedProvider];
-                
-                // Allow empty key for local (fallback to default)
-                if (!key && selectedProvider === 'local') {
-                    key = 'http://127.0.0.1:11434';
-                }
-                if (!key) throw new Error(`No API key found for ${selectedProvider}`);
-
-                let url, body, headers = { 'Content-Type': 'application/json' };
-
-if (selectedProvider === 'gemini') {
-                    const model = selectedModel || 'gemini-2.0-flash';
-                    url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
-                    body = { 
-                        contents: [{ parts: [{ text: prompt }] }], 
-                        systemInstruction: { parts: [{ text: system }] },
-                        generationConfig: {
-                            temperature: aiSettings.temp,
-                            maxOutputTokens: aiSettings.maxTokens
-                        }
-                    };
-                } else if (['openai', 'xai', 'local'].includes(selectedProvider)) {
-                    if (selectedProvider === 'local') {
-                        if (!/^https?:\/\//i.test(key)) key = 'http://' + key;
-                        const baseUrl = key.replace(/\/+$/, '').replace('localhost', '127.0.0.1');
-                        
-                        // Intelligent Route: LM Studio/v1 vs Ollama/v1
-                        if (baseUrl.includes(':1234') || baseUrl.includes('/v1')) {
-                            url = baseUrl.endsWith('/v1') ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`;
-                        } else {
-                            url = `${baseUrl}/api/chat`;
-                        }
+                    // Intelligent Route: LM Studio/v1 vs Ollama/v1
+                    if (baseUrl.includes(':11434') && !baseUrl.includes('/v1')) {
+                        url = `${baseUrl}/api/chat`; // Ollama default port
                     } else {
-                        url = selectedProvider === 'xai' ? 'https://api.x.ai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
-                        headers['Authorization'] = `Bearer ${key}`;
+                        url = baseUrl.endsWith('/v1') ? `${baseUrl}/chat/completions` : `${baseUrl}/v1/chat/completions`; // Default to OpenAI compat
                     }
-                        body = { 
-                            model: selectedModel || (selectedProvider === 'openai' ? 'gpt-4o' : selectedProvider === 'xai' ? 'grok-beta' : 'local-model'),
-                            messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }],
+                } else {
+                    url = selectedProvider === 'xai' ? 'https://api.x.ai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
+                    headers['Authorization'] = `Bearer ${key}`;
+                }
+                body = { 
+                    model: selectedModel || (selectedProvider === 'openai' ? 'gpt-4o' : selectedProvider === 'xai' ? 'grok-beta' : 'local-model'),
+                    messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }],
+                    temperature: aiSettings.temp,
+                    stream: false
+                };
+                
+                if (selectedProvider === 'local') {
+                    // Anti-hallucination stop sequences for local models
+                    body.stop = ["<|endoftext|>", ">>>>", "\n\n\n"]; 
+                    
+                    if (url.includes('/v1/')) {
+                        // LM Studio REST Requirements
+                        body.max_tokens = aiSettings.maxTokens;
+                        body.frequency_penalty = 0.0;
+                        body.presence_penalty = 0.0;
+                    } else {
+                        // Ollama Native Fallback
+                        body.options = { 
+                            num_ctx: aiSettings.context, 
+                            num_predict: aiSettings.maxTokens, 
                             temperature: aiSettings.temp,
-                            stream: false
-                        };
-                        
-                        if (selectedProvider === 'local') {
-                            body.stop = ["<|endoftext|>", ">>>>", "\n\n\n"]; 
-                            if (url.includes('/v1/')) {
-                                body.max_tokens = aiSettings.maxTokens;
-                            } else {
-                                body.options = { 
-                                    num_ctx: aiSettings.context, 
-                                    num_predict: aiSettings.maxTokens, 
-                                    temperature: aiSettings.temp,
-                                    top_k: 40,
-                                    top_p: 0.9
-                                };
-                            }
-                        } else {
-                            body.max_tokens = aiSettings.maxTokens;
-                        }
-                    } else if (selectedProvider === 'claude') {
-                        url = 'https://api.anthropic.com/v1/messages';
-                        headers['x-api-key'] = key; 
-                        headers['anthropic-version'] = '2023-06-01';
-                        body = { 
-                            model: selectedModel || 'claude-3-5-sonnet-20241022', 
-                            system: system, 
-                            messages: [{ role: 'user', content: prompt }], 
-                            max_tokens: aiSettings.maxTokens,
-                            temperature: aiSettings.temp
+                            top_k: 40,
+                            top_p: 0.9
                         };
                     }
-
-setAiStartTime(performance.now());
+                } else {
+                    body.max_tokens = aiSettings.maxTokens;
+                }
+            } else if (selectedProvider === 'claude') {
+                url = 'https://api.anthropic.com/v1/messages';
+                headers['x-api-key'] = key; headers['anthropic-version'] = '2023-06-01';
+                body = { 
+                    model: selectedModel || 'claude-3-5-sonnet-20241022', 
+                    system: system, 
+                    messages: [{ role: 'user', content: prompt }], 
+                    max_tokens: aiSettings.maxTokens,
+                    temperature: aiSettings.temp
+                };
+            }
+            setAiStartTime(performance.now());
                 try {
                     const tStart = performance.now();
                     const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
@@ -1194,7 +1170,7 @@ if (!response.ok) throw new Error(`API Error: ${result.error?.message || respons
                     
 let output;
                     if (selectedProvider === 'gemini') output = result.candidates?.[0]?.content?.parts?.[0]?.text;
-                    else if (['openai', 'xai', 'local'].includes(selectedProvider)) output = result.choices?.[0]?.message?.content;
+                    else if (['openai', 'xai', 'local'].includes(selectedProvider)) output = result.choices?.[0]?.message?.content || result.message?.content;
                     else if (selectedProvider === 'claude') output = result.content?.[0]?.text;
 
                     // Extract Thinking Process (tags like <think> or <thought>)
@@ -1655,40 +1631,10 @@ return (
                                             className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-1.5 text-xs text-blue-300 font-mono"
                                         />
                                     </div>
-</div>
-                                
-                                <div className="mt-6 pt-6 border-t border-slate-800 space-y-4">
-                                    <h3 className="text-[10px] font-black text-purple-400 uppercase tracking-widest flex items-center gap-2">
-                                        <i className="fa-solid fa-gears"></i> Engine Parameters
-                                    </h3>
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div className="space-y-1">
-                                            <div className="flex justify-between items-center text-[9px] font-bold text-slate-500 uppercase">
-                                                <span>Temperature</span>
-                                                <span className="text-purple-400">{aiSettings.temp}</span>
-                                            </div>
-                                            <input type="range" min="0" max="1" step="0.1" value={aiSettings.temp} onChange={(e) => { const next = { ...aiSettings, temp: parseFloat(e.target.value) }; setAiSettings(next); safeStorage.setItem('differ_ai_settings', JSON.stringify(next)); }} className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-purple-500" />
-                                        </div>
-                                        <div className="space-y-1">
-                                            <div className="flex justify-between items-center text-[9px] font-bold text-slate-500 uppercase">
-                                                <span>Max Output</span>
-                                                <span className="text-emerald-400">{aiSettings.maxTokens}</span>
-                                            </div>
-                                            <select value={aiSettings.maxTokens} onChange={(e) => { const next = { ...aiSettings, maxTokens: parseInt(e.target.value) }; setAiSettings(next); safeStorage.setItem('differ_ai_settings', JSON.stringify(next)); }} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[10px] text-slate-300 outline-none">
-                                                {[2048, 4096, 8192, 16384].map(v => <option key={v} value={v}>{v}</option>)}
-                                            </select>
-                                        </div>
-                                    </div>
-                                    <div className="space-y-1">
-                                        <div className="flex justify-between items-center text-[9px] font-bold text-slate-500 uppercase">
-                                            <span>Context Window (Local)</span>
-                                            <span className="text-blue-400">{aiSettings.context.toLocaleString()}</span>
-                                        </div>
-                                        <input type="number" value={aiSettings.context} onChange={(e) => { const next = { ...aiSettings, context: parseInt(e.target.value) || 2048 }; setAiSettings(next); safeStorage.setItem('differ_ai_settings', JSON.stringify(next)); }} className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-1.5 text-xs text-blue-300 font-mono" />
-                                    </div>
                                 </div>
+                                
                                 <div className="mt-6 p-3 bg-blue-900/20 border border-blue-900/50 rounded-lg text-[10px] text-blue-300">
-                                    <i className="fa-solid fa-shield-halved mr-2"></i> Settings are local to this device.
+                                    <i className="fa-solid fa-shield-halved mr-2"></i> Keys and parameters are stored only in your browser's local storage.
                                 </div>
                             </div>
                         </div>
@@ -2238,10 +2184,13 @@ onClick={() => {
                                                             ></div>
                                                         )}
                                                     </div>
-                                                    <textarea 
+<textarea 
                                                         ref={sourceRef}
                                                         value={source} 
-                                                        onChange={(e) => { setSource(e.target.value); setActiveHighlight(null); }} 
+                                                        onChange={(e) => { 
+                                                            setSource(e.target.value); 
+                                                            if (activeHighlight !== null) setActiveHighlight(null); 
+                                                        }} 
                                                         onScroll={handleScroll}
                                                         onKeyDown={(e) => {
                                                             if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
@@ -2318,7 +2267,7 @@ onClick={() => {
                                         </div>
                                     ) : showRender ? (
                                         <iframe ref={iframeRef} className="preview-frame" sandbox="allow-scripts allow-same-origin allow-modals allow-downloads allow-forms allow-popups"></iframe>
-                                    ) : (
+) : (
                                         <div className="h-full overflow-auto p-4 text-slate-400 editor-font whitespace-pre">{preview}</div>
                                     )}
                                 </div>
